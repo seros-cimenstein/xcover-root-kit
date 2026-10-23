@@ -22,8 +22,13 @@ root() {
 case ${1:-install} in
 install)
 	[[ $(adb shell su -c id 2>/dev/null) == *uid=0* ]] || { echo "no root over adb (Magisk: allow Shell)" >&2; exit 1; }
+	# Static arm64 helper (needs zig on this PC; rebuilt only when touchgrab.c changed).
+	if [[ ! -x touchgrab || touchgrab.c -nt touchgrab ]]; then
+		zig cc -target aarch64-linux-musl -static -Os -s touchgrab.c -o touchgrab
+	fi
 	adb push guard.sh /data/local/tmp/xcover-guard.sh >/dev/null
-	root "mkdir -p $dir && mv /data/local/tmp/xcover-guard.sh $dir/guard.sh && chmod 755 $dir/guard.sh"
+	adb push touchgrab /data/local/tmp/xcover-touchgrab >/dev/null
+	root "mkdir -p $dir && mv /data/local/tmp/xcover-guard.sh $dir/guard.sh && mv /data/local/tmp/xcover-touchgrab $dir/touchgrab && chmod 755 $dir/guard.sh $dir/touchgrab"
 	# Magisk runs service.d scripts after boot without waiting for them.
 	printf '%s\n' '#!/system/bin/sh' \
 		'# Installed by xcover_guard/install.sh: starts the XCover key listener after boot.' \
@@ -36,7 +41,7 @@ install)
 	root "$dir/guard.sh status"
 	;;
 uninstall)
-	root "$dir/guard.sh off; for p in \$(cat $dir/listen.pid 2>/dev/null); do kill \$p; done; pkill -f \"getevent -lt /dev/input/event4\"; rm -rf $dir $launcher"
+	root "$dir/guard.sh off; for p in \$(cat $dir/listen.pid 2>/dev/null); do kill \$p; done; pkill -f \"getevent -lt /dev/input/\"; rm -rf $dir $launcher"
 	echo "removed"
 	;;
 on | off | status)
