@@ -242,7 +242,10 @@ after 30 s of no input.
 - Daemon cost: 0.46 s of CPU in 310 s (`/proc/<pid>/stat` utime+stime), 0.15 % of one core,
   mostly kernel time for the sysfs reads (200 reads of the battery `status` file cost 7 ticks,
   of the backlight 2).
-- `dumpsys deviceidle` shows the new constants (15 s, 15 min, 1 h, 30 s, 15 s, 1 min).
+- `dumpsys deviceidle` shows the new constants (15 s, 15 min, 1 h, 30 s, 15 s, 1 min). The
+  hold is needed: at the 13:27:22 screen-off the daemon found the DeviceConfig keys gone (cause
+  not found) and put them back (logcat `rewritten: doze=stock, re-applying aggressive`), and
+  deep Doze followed at 13:29:10.
 - Kernel charge limit `batt_full_capacity` = 85 (100 before), set by Samsung's BatteryService
   from the `protect_battery` setting (logcat: `fileWriteInt ... batt_full_capacity value : 85`).
 - `off` then `on`: every knob went back to its recorded stock value (Bluetooth on, timeout
@@ -261,3 +264,8 @@ after 30 s of no input.
   short to stand for a day: screen off 7 min, 8 mAh, 65 mA average; screen on 36 min, 254 mAh,
   415 mA. Before: 191 mA screen off. `./install.sh report` after a day or two of normal use
   gives the real screen-off average; the log keeps growing.
+- The app, recorded on a scrcpy virtual display (the real screen untouched): every section
+  rendered with live values (61 %, 648 mA out, limit 85 %, the drain report, each knob with
+  now/stock); root worked for its uid. `battery.sh toggle` printed `off` / `on` with exit 0, and
+  during the `off` Protect battery stayed off (an earlier version wrote the state after
+  restoring, so a daemon round in between turned it back on).

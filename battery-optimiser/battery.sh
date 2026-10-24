@@ -189,16 +189,18 @@ turn_on() {
 }
 
 turn_off() {
+	# State first: a daemon round in between would otherwise see "on" and put held knobs back
+	# (it turned Protect battery on again in the middle of an `off` once).
+	echo off >"$STATE"
+	poke
 	load_stock
 	ERR=
 	for k in $KEYS; do
 		eval "s=\$s_$k"
 		[ -n "$s" ] && put "$k" "$s"
 	done
-	echo off >"$STATE"
 	rm -f "$STOCK"
 	thaw
-	poke
 	[ -z "$ERR" ] || { echo "not all restored (refused):$ERR" >&2; return 1; }
 }
 
