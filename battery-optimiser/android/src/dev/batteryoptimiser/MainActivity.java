@@ -1,6 +1,10 @@
 package dev.batteryoptimiser;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
@@ -12,8 +16,13 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
@@ -60,8 +69,9 @@ public class MainActivity extends Activity {
                     "Set once on Apply; turning it on in Settings for headphones sticks.",
                     "0|1", "Off|On"},
     };
-    private static final String FREEZE = "freeze";
+    private static final String FREEZE = "freeze", ALLOW = "allow";
     private static final Pattern FREEZE_OK = Pattern.compile("none|[A-Za-z0-9._:-]+(,[A-Za-z0-9._:-]+)*");
+    private static final Pattern PACKAGE_OK = Pattern.compile("[A-Za-z0-9._]+");
 
     private final Handler main = new Handler(Looper.getMainLooper());
     /** One worker, so commands never overlap. */
@@ -70,9 +80,11 @@ public class MainActivity extends Activity {
     private final Map<String, String> defaults = new HashMap<>();
     private final Map<String, TextView[]> segments = new HashMap<>();
     private final Map<String, TextView> notes = new HashMap<>();
+    /** Packages chosen for the allow knob (kept running), in the order shown. */
+    private final List<String> allow = new ArrayList<>();
     private Ui ui;
     private LinearLayout powerCard;
-    private TextView powerTitle, powerText, statusLine, message, report, freezeNote;
+    private TextView powerTitle, powerText, statusLine, message, report, freezeNote, allowList, allowNote;
     private TextView level, current, limit, screen, extra;
     private EditText freeze;
     private boolean on, busy, visible, loaded;
@@ -138,7 +150,10 @@ public class MainActivity extends Activity {
         rc.addView(again, alp);
 
         ui.header(root, "SETTINGS (OPTIMISED VALUES)", 16);
-        for (String[] k : KNOBS) knob(root, k);
+        for (String[] k : KNOBS) {
+            knob(root, k);
+            if (k[0].equals("exempt")) allowCard(root);
+        }
         freezeCard(root);
 
         message = ui.text("", 14, Ui.HOT, false);
@@ -239,6 +254,87 @@ public class MainActivity extends Activity {
         c.addView(note);
         notes.put(key, note);
         paintKnob(key);
+    }
+
+    /** The allow knob: apps made Unrestricted, picked from the launcher apps. */
+    private void allowCard(LinearLayout parent) {
+        LinearLayout c = card(parent);
+        cardHead(c, "Keep these apps running",
+                "Made Unrestricted: exempt from Doze and never background-restricted (Android kills a "
+                        + "restricted app soon after it goes to the background, which cuts Brave's background "
+                        + "play). They stay exempt with Doze exemptions on Apps or All, and cost battery while "
+                        + "they work in the background.");
+        allowList = ui.text("None", 15, Ui.FG, true);
+        c.addView(allowList);
+        TextView choose = ui.button("Choose apps", false);
+        choose.setOnClickListener(v -> chooseApps());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, ui.dp(10), 0, 0);
+        c.addView(choose, lp);
+        allowNote = ui.text("", 12, Ui.MUTED, false);
+        allowNote.setPadding(ui.dp(4), ui.dp(6), 0, 0);
+        c.addView(allowNote);
+    }
+
+    /** App label of a package, or the package name if it can't be resolved. */
+    private String appLabel(String pkg) {
+        PackageManager pm = getPackageManager();
+        try {
+            return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+        } catch (PackageManager.NameNotFoundException e) {
+            return pkg;
+        }
+    }
+
+    private String labels(List<String> pkgs) {
+        if (pkgs.isEmpty()) return "None";
+        StringBuilder b = new StringBuilder();
+        for (String p : pkgs) b.append(b.length() == 0 ? "" : ", ").append(appLabel(p));
+        return b.toString();
+    }
+
+    private void paintAllow() {
+        allowList.setText(labels(allow));
+    }
+
+    /** Lists the launcher apps (plus any chosen ones that aren't) off the main thread, then the picker. */
+    private void chooseApps() {
+        if (!loaded) return;
+        new Thread(() -> {
+            PackageManager pm = getPackageManager();
+            Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+            Set<String> seen = new HashSet<>();
+            List<String[]> apps = new ArrayList<>();
+            for (ResolveInfo ri : pm.queryIntentActivities(launcher, 0)) {
+                String p = ri.activityInfo.packageName;
+                if (p.equals(getPackageName()) || !seen.add(p)) continue;
+                apps.add(new String[]{ri.loadLabel(pm).toString(), p});
+            }
+            for (String p : allow) if (seen.add(p)) apps.add(new String[]{appLabel(p), p});
+            apps.sort((a, b) -> a[0].compareToIgnoreCase(b[0]));
+            runOnUiThread(() -> showPicker(apps));
+        }).start();
+    }
+
+    private void showPicker(List<String[]> apps) {
+        String[] names = new String[apps.size()];
+        boolean[] checked = new boolean[apps.size()];
+        for (int i = 0; i < apps.size(); i++) {
+            names[i] = apps.get(i)[0];
+            checked[i] = allow.contains(apps.get(i)[1]);
+        }
+        new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Keep these apps running")
+                .setMultiChoiceItems(names, checked, (d, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("OK", (d, w) -> {
+                    allow.clear();
+                    for (int i = 0; i < apps.size(); i++) if (checked[i]) allow.add(apps.get(i)[1]);
+                    paintAllow();
+                    say("Press Apply to use them.", Ui.ACCENT);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void freezeCard(LinearLayout parent) {
@@ -352,7 +448,17 @@ public class MainActivity extends Activity {
         freeze.setText(k.get(FREEZE + ".want"));
         defaults.put(FREEZE, k.get(FREEZE + ".default"));
         freezeNote.setText("default: " + k.get(FREEZE + ".default"));
+        allow.clear();
+        allow.addAll(packages(k.get(ALLOW + ".want")));
+        paintAllow();
+        allowNote.setText("unrestricted now: " + labels(packages(k.get(ALLOW))));
         paintPower();
+    }
+
+    /** "a,b" -> [a, b]; "none", empty or missing -> []. */
+    private static List<String> packages(String v) {
+        if (v == null || v.isEmpty() || v.equals("none")) return new ArrayList<>();
+        return new ArrayList<>(Arrays.asList(v.split(",")));
     }
 
     private void showNow(Bat.Result r) {
@@ -410,6 +516,8 @@ public class MainActivity extends Activity {
             paintKnob(s[0]);
         }
         freeze.setText(defaults.get(FREEZE));
+        allow.clear();
+        paintAllow();
         say("Defaults filled in: press Apply to use them.", Ui.ACCENT);
     }
 
@@ -421,10 +529,17 @@ public class MainActivity extends Activity {
             say("Freeze: none, or process names separated by commas (letters, digits, . _ : -).", Ui.HOT);
             return;
         }
-        // Every value is a table entry or matched FREEZE_OK, so the line is shell-safe.
+        for (String p : allow) {
+            if (!PACKAGE_OK.matcher(p).matches()) {
+                say("Keep running: bad package name " + p, Ui.HOT);
+                return;
+            }
+        }
+        // Every value is a table entry or matched FREEZE_OK / PACKAGE_OK, so the line is shell-safe.
         StringBuilder args = new StringBuilder("apply");
         for (String[] s : KNOBS) args.append(' ').append(s[0]).append('=').append(chosen.get(s[0]));
         args.append(' ').append(FREEZE).append('=').append(f);
+        args.append(' ').append(ALLOW).append('=').append(allow.isEmpty() ? "none" : String.join(",", allow));
         setBusy(true);
         say("Applying...", Ui.MUTED);
         worker.execute(() -> {

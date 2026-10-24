@@ -44,7 +44,9 @@ Forever); until then it shows "No root".
     changes until **Apply**, which saves them as the optimised values and turns the optimiser on;
     **Defaults** fills in the built-in optimised values (press Apply to use them). Errors from
     `battery.sh` show above the buttons. The **Doze exemptions** card (Keep / Apps / All) also
-    lists the apps exempt now and the exemptions the optimiser removed.
+    lists the apps exempt now and the exemptions the optimiser removed. **Keep these apps
+    running** opens a list of the launcher apps to tick (the `allow` knob) and shows which of
+    them are Unrestricted now.
 - **Quick Settings tile "Battery"**: pull the panel down twice, tap the pencil, drag Battery in.
   A tap runs `battery.sh toggle` (optimised <-> stock; it takes a few seconds), the subtitle shows
   Optimised or Stock, and the tile is lit while on. It asks `battery.sh get` whenever the panel
@@ -103,6 +105,7 @@ A phone in deep sleep draws well under 20 mA, so the screen-off drain was the pr
 | `protect_battery` | `global protect_battery` | 0 | 1 | Samsung's "Protect battery": charging stops at 85 % (`batt_full_capacity`) | yes |
 | `doze` | DeviceConfig `device_idle` | stock | aggressive | deep Doze about 2 minutes after the screen goes off instead of 35 min at the earliest | yes |
 | `exempt` | Doze whitelist (`dumpsys deviceidle whitelist` / `sys-whitelist`) | keep | keep | `apps`/`all` take Doze exemptions away for the most battery (see below) | yes |
+| `allow` | Doze whitelist + app-op `RUN_ANY_IN_BACKGROUND` | none | none | apps you pick stay "Unrestricted", whatever `exempt` says (see below) | yes |
 | `freeze` | cgroup freezer | none | `mosh-client` | processes frozen while the screen is off (see below) | daemon |
 
 "Held" knobs are put back by the daemon if something changes them (checked each time the
@@ -119,6 +122,8 @@ Allowed values (`./install.sh knobs` lists them):
 - `stay_awake`: 0..7, a bit mask (1 AC, 2 USB, 4 wireless).
 - `doze`: `stock` or `aggressive`.
 - `exempt`: `keep`, `apps` or `all`.
+- `allow`: `none`, or a comma list of installed package names, e.g.
+  `allow=com.brave.browser` (anything not installed is rejected).
 - `freeze`: `none`, or a comma list of process names as in `/proc/<pid>/comm` (at most 15
   characters), e.g. `freeze=mosh-client,ssh`.
 
@@ -171,14 +176,32 @@ Knox Guard, CSC, provisioning and shell, so calls, SMS, alarms and emergency ale
 
 `apps`/`all` record each exemption they remove in `/data/adb/battery-optimiser/exempt`; `keep`
 (and `off`) put exactly those back. The knob is held: an app made "Unrestricted" again (by hand,
-or an app asking for it) loses it at the next screen-off while `apps`/`all` is set. To keep one
-app exempt, use `keep`.
+or an app asking for it) loses it at the next screen-off while `apps`/`all` is set. To keep
+one app exempt anyway, add it to `allow`.
 
 With `apps`, Tailscale keeps running, but Android's Doze network rules block a non-exempt app
 from light Doze on (15 s after the screen goes off with the `aggressive` constants), so the
 laptop loses adb until the screen comes on or a maintenance window opens. Verified on the phone:
 after `apps`, netpolicy no longer lists `POWER_SAVE_ALLOWLIST` for Tailscale's or Termux's uid;
 after `all`, not for Google Play services either; after `keep`, all of them have it again.
+
+### Apps you keep running (`allow`)
+
+Every package in `allow` is made "Unrestricted", as in the app's battery settings: it gets a
+user Doze exemption and its `RUN_ANY_IN_BACKGROUND` app-op is set back to allowed if it was
+`ignore`. `exempt=apps`/`all` never remove these. Taking an app off the list undoes exactly what
+was changed for it (recorded in `/data/adb/battery-optimiser/allowed` as
+`<package> <1 if we added the exemption> <app-op mode before>`): an app that was Restricted
+before is Restricted again. The knob is held: if something restricts the app again, the
+daemon makes it Unrestricted at the next screen-off (logcat
+`rewritten: allow=none, re-applying com.brave.browser`).
+
+Why Brave's background play dropped: Brave was **Restricted** (`RUN_ANY_IN_BACKGROUND: ignore`;
+it was not set by this tool; 32 more apps had it, among them Firefox, SoundCloud, ChatGPT and
+Claude). Android kills a restricted app shortly after it is cached in the background:
+`dumpsys activity exit-info com.brave.browser` showed the main process killed at 14:36 and 14:49
+with `cached idle & background restricted`. The kill reason is the restriction, not Doze, so
+`allow` lifts the restriction as well as adding the Doze exemption.
 
 ### Freezing while the screen is off
 
