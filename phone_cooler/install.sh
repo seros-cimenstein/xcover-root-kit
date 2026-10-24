@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# install.sh [install|uninstall|status|set PROFILE] — phone-cooler on the rooted phone, over adb.
+# install.sh [install|uninstall|status|knobs|set PROFILE|apply KEY=VALUE...] — phone-cooler on the
+# rooted phone, over adb.
 # Uses $ANDROID_SERIAL, else the Tailscale address saved by phone-adb (remote_control), else
 # the only adb device.
 set -euo pipefail
@@ -56,10 +57,19 @@ status)
 	root "$dir/cool.sh status"
 	;;
 set)
-	root "$dir/cool.sh set ${2:?profile: off|mild|cool|cold} && $dir/cool.sh status"
+	root "$dir/cool.sh set ${2:?profile: off|mild|cool|cold|custom} && $dir/cool.sh status"
+	;;
+knobs)
+	root "$dir/cool.sh knobs"
+	;;
+apply)
+	shift
+	(($#)) || { echo "usage: $0 apply KEY=VALUE ... (see: $0 knobs)" >&2; exit 2; }
+	# Values are table entries (digits and governor names); cool.sh validates them again.
+	root "$dir/cool.sh apply $* && $dir/cool.sh status"
 	;;
 *)
-	echo "usage: $0 [install|uninstall|status|set off|mild|cool|cold]" >&2
+	echo "usage: $0 [install|uninstall|status|knobs|set off|mild|cool|cold|custom|apply KEY=VALUE...]" >&2
 	exit 2
 	;;
 esac

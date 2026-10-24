@@ -8,7 +8,7 @@ import android.service.quicksettings.TileService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Quick Settings tile: a tap cycles Off -> Mild -> Cool -> Cold via {@code cool.sh next}. */
+/** Quick Settings tile: a tap cycles Off -> Mild -> Cool -> Cold (-> Custom once saved) via {@code cool.sh next}. */
 public class CoolerTile extends TileService {
     /** One worker, so taps run in order and never overlap. */
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
@@ -20,12 +20,12 @@ public class CoolerTile extends TileService {
     @Override
     public void onStartListening() {
         if (last != null) show(last);
-        WORKER.execute(() -> deliver(Cool.run("get")));
+        WORKER.execute(() -> deliver(Cool.run("get").out));
     }
 
     @Override
     public void onClick() {
-        WORKER.execute(() -> deliver(Cool.run("next")));
+        WORKER.execute(() -> deliver(Cool.run("next").out));
     }
 
     private void deliver(String result) {
