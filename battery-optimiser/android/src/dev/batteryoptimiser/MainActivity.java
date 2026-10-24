@@ -40,8 +40,16 @@ public class MainActivity extends Activity {
                     "0|1|2|3|4|5|6|7", "Never|AC|USB|AC+USB|Wireless|AC+Wl|USB+Wl|Always"},
             {"doze", "Doze",
                     "Aggressive: deep sleep about 2 min after the screen goes off (stock: 35 min or more). "
-                            + "Tailscale, DevDeck, Termux and PhoneDeck are exempt and keep their network.",
+                            + "Apps with a Doze exemption (below) keep their network while it sleeps.",
                     "stock|aggressive", "Stock|Aggressive"},
+            {"exempt", "Doze exemptions",
+                    "Keep: Tailscale, DevDeck, Termux, Termius and PhoneDeck stay exempt, so remote control "
+                            + "works with the screen off. Apps: they lose it; best for battery, but adb over "
+                            + "Tailscale, DevDeck, mosh and PhoneDeck stop while the phone sleeps and come back "
+                            + "when the screen turns on. All: also Google Play services and Samsung extras; "
+                            + "push messages (WhatsApp, banks) then wait for Doze's maintenance windows. "
+                            + "Calls, SMS, alarms and emergency alerts are never touched.",
+                    "keep|apps|all", "Keep|Apps|All"},
             {"wifi_scan", "Wi-Fi scanning",
                     "Location scans for Wi-Fi networks even while Wi-Fi is off.",
                     "0|1", "Off|On"},
@@ -331,8 +339,14 @@ public class MainActivity extends Activity {
             chosen.put(key, k.get(key + ".want"));
             defaults.put(key, k.get(key + ".default"));
             String stock = k.get(key + ".stock");
+            String extra = "";
+            if (key.equals("exempt")) {
+                String apps = k.get("exempt.apps"), removed = k.get("exempt.removed");
+                if (apps != null && !apps.isEmpty()) extra += "\nexempt now: " + apps.replace(",", ", ");
+                if (removed != null && !removed.isEmpty()) extra += "\nremoved: " + removed.replace(",", ", ");
+            }
             notes.get(key).setText("now: " + label(key, k.get(key))
-                    + (stock == null || stock.isEmpty() ? "" : "   stock: " + label(key, stock)));
+                    + (stock == null || stock.isEmpty() ? "" : "   stock: " + label(key, stock)) + extra);
             paintKnob(key);
         }
         freeze.setText(k.get(FREEZE + ".want"));

@@ -26,6 +26,7 @@ STOCK=$DIR/stock      # key=value: values found before the first change, put bac
 LOG=$DIR/drain.log    # <epoch s> <event> <screen> <battery status> <charge uAh> <level %>
 PIDFILE=$DIR/daemon.pid
 TICK=$DIR/tick        # fifo: the daemon sleeps on it; commands write a line to wake it
+EXEMPT=$DIR/exempt    # "user <pkg>" / "sys <pkg>": Doze exemptions we removed, put back by keep
 GUARD=/data/adb/xcover-guard/state # exists while xcover_guard's guard mode is on
 BL=/sys/class/backlight/panel/brightness
 BATT=/sys/class/power_supply/battery
@@ -33,16 +34,23 @@ FREEZER=/dev/freezer
 FZ=$FREEZER/battery-optimiser
 POLL_S=5
 
-KEYS="wifi_scan ble_scan bluetooth screen_timeout stay_awake protect_battery doze freeze"
+KEYS="wifi_scan ble_scan bluetooth screen_timeout stay_awake protect_battery doze exempt freeze"
 # Held knobs are put back by the daemon (checked when the screen goes off); the others are
 # only applied by on/apply, so turning Bluetooth on or changing the timeout by hand sticks.
-HELD="wifi_scan ble_scan protect_battery doze"
+HELD="wifi_scan ble_scan protect_battery doze exempt"
 TIMEOUTS="15000 30000 60000 120000 300000 600000 1800000 2147483647"
 # Doze (DeviceIdleController, DeviceConfig namespace device_idle). Stock: light doze 1 min after
 # the screen goes off, deep doze only after 15 min inactive + 20 min idle-pending with no motion.
 # sensing_to/locating_to stay stock: on Android 13 a sensing timeout restarts the progression.
 DOZE="light_after_inactive_to=15000 light_idle_to=900000 light_max_idle_to=3600000 \
 inactive_to=30000 idle_after_inactive_to=15000 motion_inactive_to=60000"
+# System Doze exemptions that `exempt=all` removes: Google Play services (push messages wait
+# for Doze's maintenance windows) and Samsung extras. Never removed: dialer, messages, IMS
+# (VoLTE calls), emergency alerts and SOS, clock, contacts, Knox Guard, CSC, provisioning, shell.
+SYS_EXTRA="com.google.android.gms com.android.providers.calendar com.android.providers.downloads \
+com.sec.android.easyonehand com.samsung.android.app.smartcapture \
+com.samsung.android.allshare.service.fileshare com.samsung.adaptivebrightnessgo \
+com.samsung.android.bluelightfilter com.samsung.android.sdk.handwriting com.samsung.android.video"
 
 # D = optimised default of knob $1.
 default() {
@@ -51,6 +59,7 @@ default() {
 	screen_timeout) D=30000 ;;
 	protect_battery) D=1 ;;
 	doze) D=aggressive ;;
+	exempt) D=keep ;;
 	freeze) D=mosh-client ;;
 	esac
 }
@@ -62,6 +71,7 @@ options() {
 	screen_timeout) O=$TIMEOUTS ;;
 	stay_awake) O="0 1 2 3 4 5 6 7" ;;
 	doze) O="stock aggressive" ;;
+	exempt) O="keep apps all" ;;
 	freeze) O="none|name[,name...]" ;;
 	esac
 }
@@ -105,9 +115,51 @@ $cfg
 $kv
 "*) ;; *) L=stock ;; esac
 		done
+	elif [ "$1" = exempt ]; then
+		# keep while any user exemption exists or we removed none (the file exists from the
+		# first apps/all on, even if there was nothing to remove).
+		exemptions
+		if [ -n "$EU" ] || [ ! -f "$EXEMPT" ]; then L=keep; elif [ -n "$ES" ]; then L=apps; else L=all; fi
 	else
 		eval "L=\$v_$1" # freeze: nothing to read back; the daemon applies it
 	fi
+}
+
+# EU = user Doze exemptions now (apps set to "Unrestricted"), ES = the SYS_EXTRA ones still
+# exempt; space-separated package names.
+exemptions() {
+	EU= ES=
+	for line in $(dumpsys deviceidle whitelist); do
+		p=${line#*,}
+		p=${p%%,*}
+		case $line in
+		user,*) EU="${EU:+$EU }$p" ;;
+		system,*) case " $SYS_EXTRA " in *" $p "*) ES="${ES:+$ES }$p" ;; esac ;;
+		esac
+	done
+}
+
+# Exemption level $1: keep puts back everything we removed; apps removes the user exemptions;
+# all removes those and SYS_EXTRA. Going down a level puts back first, then removes.
+put_exempt() {
+	if [ -f "$EXEMPT" ]; then
+		while read -r kind p; do
+			if [ "$kind" = sys ]; then dumpsys deviceidle sys-whitelist "+$p"; else dumpsys deviceidle whitelist "+$p"; fi
+		done <"$EXEMPT" >/dev/null 2>&1
+		rm -f "$EXEMPT"
+	fi
+	[ "$1" = keep ] && return
+	: >>"$EXEMPT"
+	exemptions
+	for p in $EU; do
+		echo "user $p" >>"$EXEMPT"
+		dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
+	done
+	[ "$1" = all ] || return 0
+	for p in $ES; do
+		echo "sys $p" >>"$EXEMPT"
+		dumpsys deviceidle sys-whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
+	done
 }
 
 # Writes value $2 to knob $1 ("null" deletes the setting); a failed write is added to ERR.
@@ -128,6 +180,8 @@ put() {
 				device_config delete device_idle "${kv%%=*}"
 			fi >/dev/null 2>&1 || ERR="$ERR doze:${kv%%=*}"
 		done
+	elif [ "$1" = exempt ]; then
+		put_exempt "$2"
 	fi
 }
 
@@ -454,6 +508,12 @@ knobs() {
 		echo "$k.default=$D"
 		echo "$k.options=$O"
 	done
+	# exempt: the user exemptions now and what we removed (comma lists, for the app).
+	exemptions
+	r=
+	[ -f "$EXEMPT" ] && while read -r kind p; do r="${r:+$r,}$p"; done <"$EXEMPT"
+	echo "exempt.apps=${EU// /,}"
+	echo "exempt.removed=$r"
 }
 
 # Discharge per screen state from the log: the interval between two lines counts for the
