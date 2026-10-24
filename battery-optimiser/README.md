@@ -62,16 +62,17 @@ A phone in deep sleep draws well under 20 mA, so the screen-off drain was the pr
 |---|---|---|---|---|---|
 | `wifi_scan` | `global wifi_scan_always_enabled` | 1 | 0 | stops the Wi-Fi chip scanning for location while Wi-Fi is off | yes |
 | `ble_scan` | `global ble_scan_always_enabled` | 1 | 0 | stops apps scanning Bluetooth LE while Bluetooth is off | yes |
-| `bluetooth` | `cmd bluetooth_manager enable/disable` | on | off | nothing is paired; ends Google's 29 h/day of scanning | no |
-| `screen_timeout` | `system screen_off_timeout` | never | 30000 (30 s) | the screen is the largest single consumer while on | no |
+| `bluetooth` | `cmd bluetooth_manager enable/disable` | on | off | nothing is paired; ends Google Play services' constant LE scanning | no |
+| `screen_timeout` | `system screen_off_timeout` | never | 30000 (30 s) | with "never" the panel stayed lit until the power button; the screen-on average was 426 mA | no |
 | `stay_awake` | `global stay_on_while_plugged_in` | 7 | 0 | screen off while charging: less power and less heat in the charging cell | no |
 | `protect_battery` | `global protect_battery` | 0 | 1 | Samsung's "Protect battery": charging stops at 85 % (`batt_full_capacity`) | yes |
-| `doze` | DeviceConfig `device_idle` | stock | aggressive | deep Doze within about a minute of the screen going off instead of 35 min | yes |
+| `doze` | DeviceConfig `device_idle` | stock | aggressive | deep Doze about 2 minutes after the screen goes off instead of 35 min at the earliest | yes |
 | `freeze` | cgroup freezer | none | `mosh-client` | processes frozen while the screen is off (see below) | daemon |
 
 "Held" knobs are put back by the daemon if something changes them (checked each time the
-screen goes off; `protect_battery` on every 5 s round, since Samsung turns it off by itself
-after a long time on the charger). The others are applied once by `on`/`apply`: turning
+screen goes off). `protect_battery` is also watched through the kernel limit every 5 s round,
+since Samsung turns it off by itself after a long time on the charger; the daemon toggles the
+setting once to make BatteryService write 85 again. The others are applied once by `on`/`apply`: turning
 Bluetooth on for headphones or changing the timeout in Settings sticks. To keep a different
 value, set it as the optimised value: `./install.sh apply bluetooth=1`.
 
@@ -131,7 +132,10 @@ frozen with it.
 "Screen off" means the panel's raw backlight (`/sys/class/backlight/panel/brightness`) is 0
 while `../xcover_guard`'s guard mode is off. Guard mode holds the backlight at 0 with the display
 on while agents drive the phone, so it counts as on. The daemon checks every 5 s of awake time,
-so a process thaws at most 5 s after the screen comes on.
+so a process thaws at most 5 s after the screen comes on. Samsung's "early wake-up"
+(`setEarlyWakeUp` in logcat) lights the panel before the phone is interactive, and that counts
+as on too: at 13:31:14 the log shows 11 s "on" while Doze, which only looks at the interactive
+state, stayed idle.
 
 ### Screen timeout and guard mode
 
@@ -181,7 +185,8 @@ after 30 s of no input.
   overridden by `settings` (`key=value` lines, written by `apply`); `state` says on or off.
 - `/data/adb/service.d/battery-optimiser.sh`: Magisk runs it after boot; it waits for boot
   completion and starts `battery.sh daemon`, which re-applies the held knobs, then wakes every
-  5 s of awake time: builtin reads only (backlight, guard state file, battery status), and a
+  5 s of awake time: builtin reads only (backlight, guard state file, battery status, the
+  optimiser's state file, the kernel charge limit), and a
   timed `read` on a fifo (`tick`) instead of `sleep`, so a round forks nothing. On a screen
   change it freezes or thaws, checks the held knobs (this part forks `settings` and
   `device_config`) and logs. Commands wake it through the fifo when the state or settings change.
@@ -190,7 +195,7 @@ after 30 s of no input.
 - `drain.log`: one line per screen change, charger change and daemon start:
   `<epoch s> <event> <screen> <battery status> <charge counter uAh> <level %>`. `report` adds up
   the intervals that started on battery per screen state (skipping those that end at a daemon
-  start, i.e. a reboot) and lists the screen-off stretches of 30 min or more; then the same
+  start: a reboot or reinstall) and lists the screen-off stretches of 30 min or more; then the same
   numbers from batterystats since the last full charge.
 - The daemon logs to logcat as `battery-optimiser` (re-applied knobs, freezes).
 
@@ -200,6 +205,27 @@ after 30 s of no input.
 
 - Bluetooth classic off; Google Play services' LE scans stopped (`dumpsys bluetooth_manager`:
   6 started / 6 stopped, no ongoing scan of its own). Samsung's system scanner remains (above).
+- Wi-Fi off now really means off: `dumpsys wifi` shows `DisabledState` with 0 active mode
+  managers. Before, Wi-Fi off kept a scan-only client running (batterystats: "scanning" 21 h).
+- Daemon cost: 0.46 s of CPU in 310 s (`/proc/<pid>/stat` utime+stime), 0.15 % of one core,
+  mostly kernel time for the sysfs reads (200 reads of the battery `status` file cost 7 ticks,
+  of the backlight 2).
 - `dumpsys deviceidle` shows the new constants (15 s, 15 min, 1 h, 30 s, 15 s, 1 min).
 - Kernel charge limit `batt_full_capacity` = 85 (100 before), set by Samsung's BatteryService
   from the `protect_battery` setting (logcat: `fileWriteInt ... batt_full_capacity value : 85`).
+- `off` then `on`: every knob went back to its recorded stock value (Bluetooth on, timeout
+  never, stay-awake 7, limit 100 %, the DeviceConfig keys deleted) and then to the optimised
+  ones again; with guard mode on, the timeout went into guard's state file both ways.
+- Screen detection against PowerManager's log: power-button off at 13:06:53 was logged at
+  13:06:59; off at 13:07:44 / on at 13:07:53 were logged at 13:07:49 / 13:07:56. Off periods
+  shorter than the 5 s round (two of them) are not seen, which only matters for freezing.
+- After a reboot (a manual reset, `power_off_reset_reason.txt`: `ONSRC: MRST`), Magisk started
+  the daemon, every held knob was still applied and Bluetooth stayed off. Samsung's system BLE
+  scanner put the controller back in `BLE_ON` at boot, as before.
+- Doze, screen off at 13:27:22 with the phone lying still: light Doze at 13:28:38, **deep Doze
+  at 13:29:10, 108 s after the screen went off** (stock: 35 min at the earliest); it left deep
+  Doze at 13:31:59 on motion (the phone was picked up).
+- First drain numbers from `report`, right after the reboot, so with boot work in them and too
+  short to stand for a day: screen off 7 min, 8 mAh, 65 mA average; screen on 36 min, 254 mAh,
+  415 mA. Before: 191 mA screen off. `./install.sh report` after a day or two of normal use
+  gives the real screen-off average; the log keeps growing.

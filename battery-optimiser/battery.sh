@@ -81,7 +81,8 @@ setting() {
 guard_timeout() {
 	G=
 	[ -f "$GUARD" ] || return 1
-	while IFS== read -r k v; do [ "$k" = timeout ] && G=$v; done <"$GUARD"
+	# gk/gv: callers loop over k.
+	while IFS== read -r gk gv; do [ "$gk" = timeout ] && G=$gv; done <"$GUARD"
 	return 0
 }
 
@@ -254,16 +255,16 @@ screen() {
 	if [ "$b" = 0 ] && [ ! -e "$GUARD" ]; then S=off; else S=on; fi
 }
 
-# B = battery status (Discharging, Charging, Full, Not charging), C = charge counter (uAh),
-# P = level (%).
+# B = battery status (Discharging, Charging, Full, Not_charging); read every round.
 battery() {
 	read -r B <"$BATT/status"
-	read -r C <"$BATT/charge_counter"
-	read -r P <"$BATT/capacity"
 	B=${B// /_}
 }
 
+# Appends a log line with the charge counter (uAh) and level (%), read only here.
 logline() {
+	read -r C <"$BATT/charge_counter"
+	read -r P <"$BATT/capacity"
 	echo "${EPOCHREALTIME%.*} $1 $S $B $C $P" >>"$LOG"
 }
 
@@ -328,18 +329,26 @@ daemon() {
 	logline start
 	lastS=$S lastB=$B
 	[ -n "$on" ] && [ "$S" = off ] && freeze
+	pbcheck=1
 	while :; do
 		# A timed read on the fifo instead of `sleep`: no fork per round. A line means a command
-		# changed the state or settings.
-		if read -t $POLL_S _ <>"$TICK"; then
-			want
-			thaw
-			on=
-			is_on && on=1
-			[ -n "$on" ] && [ "$lastS" = off ] && freeze
-		fi
+		# changed the state or settings. The state file is read every round as well, in case a
+		# line got lost (a fifo drops what is written while nobody has it open).
+		poked=
+		read -t $POLL_S _ <>"$TICK" && poked=1
 		screen
 		battery
+		was=$on
+		on=
+		is_on && on=1
+		if [ -n "$poked" ] || [ "$on" != "$was" ] || [ "$S" != "$lastS" ]; then
+			want
+			pbcheck=1
+		fi
+		if [ -n "$poked" ] || [ "$on" != "$was" ]; then
+			thaw
+			[ -n "$on" ] && [ "$S" = off ] && [ "$lastS" = off ] && freeze
+		fi
 		if [ "$S" != "$lastS" ]; then
 			logline screen
 			lastS=$S lastB=$B
@@ -356,11 +365,14 @@ daemon() {
 			lastB=$B
 		fi
 		# Samsung turns Protect battery off by itself after a long time on the charger
-		# (TURN_OFF_PROTECT_BATTERY_BY_LONG_TERM_TA); the kernel limit shows it at once.
-		if [ -n "$on" ] && [ "$v_protect_battery" = 1 ]; then
+		# (TURN_OFF_PROTECT_BATTERY_BY_LONG_TERM_TA); the kernel limit shows it at once. Checked
+		# once per screen change or command, so a limit that won't come back doesn't loop.
+		if [ -n "$pbcheck" ] && [ -n "$on" ] && [ "$v_protect_battery" = 1 ]; then
 			read -r cap <"$BATT/batt_full_capacity"
 			if [ "$cap" = 100 ]; then
+				pbcheck=
 				log -t battery-optimiser "protect battery was turned off, turning it back on"
+				settings put global protect_battery 0
 				settings put global protect_battery 1
 			fi
 		fi
@@ -382,6 +394,7 @@ status() {
 	[ -f "$GUARD" ] && echo "(guard mode is on: screen_timeout is the value it restores)"
 	screen
 	battery
+	read -r P <"$BATT/capacity"
 	read -r cur <"$BATT/current_now"
 	read -r cap <"$BATT/batt_full_capacity"
 	echo "screen: $S; battery: $P % $B, $cur mA now, charge limit $cap %"
