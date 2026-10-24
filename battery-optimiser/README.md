@@ -3,7 +3,8 @@
 Cuts the battery drain of the rooted Galaxy XCover Pro (SM-G715FN, Exynos 9611, Android 13,
 4050 mAh) and caps charging at 85 % so the cell lasts longer. One root script (`battery.sh`)
 applies a set of measured settings, a small daemon keeps them applied, freezes `mosh-client`
-while the screen is off and logs the drain per screen state so the result can be checked.
+while the screen is off and logs the drain per screen state so the result can be checked. The
+**Battery app** (Quick Settings tile + screen) switches it and sets every knob from the phone.
 
 Everything the remote-control setup needs keeps working: Tailscale, adb over Tailscale
 (`../remote_control`), DevDeck/DevDeck+, Termux and PhoneDeck are on the user Doze whitelist,
@@ -11,13 +12,44 @@ so the stronger Doze doesn't cut their network. CPU/GPU clocks are `../phone_coo
 nothing here touches them.
 
 ```
-./install.sh            # copy battery.sh + boot launcher, apply the optimised values, start the daemon
+./install.sh            # build the app, copy battery.sh + boot launcher, apply the optimised values,
+                        # start the daemon, stage the APK
 ./install.sh status     # every knob: now / optimised / stock, screen, battery, frozen processes
 ./install.sh report     # drain per screen state from the daemon's log, plus batterystats
 ./install.sh apply screen_timeout=60000 bluetooth=1   # change optimised values
 ./install.sh off        # put the stock values back (on: apply again)
 ./install.sh uninstall  # stock values back, daemon stopped, files removed
 ```
+
+It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (`../remote_control`),
+else the only adb device. Needs root for adb's shell (Magisk: Shell allowed) and a JDK; the
+Android build tools come from `../phone_synaptic_trackpad/.sdk` (see `android/build.sh`).
+
+## The app
+
+`install.sh` only copies the app to `/data/local/tmp/battery-optimiser.apk`; install it with
+`adb shell pm install -r /data/local/tmp/battery-optimiser.apk` (if Play Protect asks, confirm
+on the phone). Opening it the first time makes Magisk ask for root for "Battery" (Grant,
+Forever); until then it shows "No root".
+
+- **Battery screen** (launcher icon: a battery with a plus):
+  - the on/off card at the top: on applies the optimised values, off puts the stock ones back;
+  - **Now**: level, current (mA out of / into the battery), the kernel charge limit, screen state,
+    battery status, frozen processes and whether the daemon runs, from `battery.sh now` every
+    2 s while the screen is open (builtin reads only);
+  - **Drain**: `battery.sh report` (own log plus batterystats), loaded on open, "Refresh report";
+  - **Settings**: every knob with its allowed values, plus "now" and "stock" under each. Nothing
+    changes until **Apply**, which saves them as the optimised values and turns the optimiser on;
+    **Defaults** fills in the built-in optimised values (press Apply to use them). Errors from
+    `battery.sh` show above the buttons.
+- **Quick Settings tile "Battery"**: pull the panel down twice, tap the pencil, drag Battery in.
+  A tap runs `battery.sh toggle` (optimised <-> stock; it takes a few seconds), the subtitle shows
+  Optimised or Stock, and the tile is lit while on. It asks `battery.sh get` whenever the panel
+  shows it, so changes from the laptop show up.
+
+The app (`dev.batteryoptimiser`, no permissions) runs `su -c /data/adb/battery-optimiser/battery.sh
+...` on a background thread; the commands it uses are `get`, `toggle`, `now`, `knobs`, `apply` and
+`report`.
 
 ## Where the battery went (before)
 

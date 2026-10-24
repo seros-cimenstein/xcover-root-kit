@@ -6,8 +6,11 @@
 #
 #   battery.sh on                  apply the optimised values (the stock ones are saved first)
 #   battery.sh off                 put the saved stock values back
+#   battery.sh get | toggle        print on/off | switch on<->off and print the new state (tile)
 #   battery.sh status              every knob (now / optimised / stock), screen, battery, daemon
-#   battery.sh knobs               machine-readable: key=<live>, key.want=, key.stock=, key.options=
+#   battery.sh now                 the app's readout: state, screen, battery, limit, frozen, daemon
+#   battery.sh knobs               machine-readable: key=<live>, key.want=, key.stock=,
+#                                  key.default=, key.options=
 #   battery.sh apply key=value ... change optimised values and apply them (turns the optimiser on)
 #   battery.sh report              battery drain per screen state, from the daemon's log
 #   battery.sh daemon              keep it applied: freezes the `freeze` processes while the
@@ -398,13 +401,43 @@ status() {
 	read -r cur <"$BATT/current_now"
 	read -r cap <"$BATT/batt_full_capacity"
 	echo "screen: $S; battery: $P % $B, $cur mA now, charge limit $cap %"
+	frozen
+	echo "frozen:${f:- none}"
+	if pid=$(daemon_pid); then echo "daemon: running (pid $pid)"; else echo "daemon: not running"; fi
+}
+
+# f = the frozen processes as " name(pid) ...".
+frozen() {
 	f=
-	[ -f "$FZ/cgroup.procs" ] && while read -r p; do
+	[ -f "$FZ/cgroup.procs" ] || return 0
+	while read -r p; do
+		c=
 		read -r c 2>/dev/null <"/proc/$p/comm"
 		f="$f $c($p)"
 	done <"$FZ/cgroup.procs"
-	echo "frozen:${f:- none}"
-	if pid=$(daemon_pid); then echo "daemon: running (pid $pid)"; else echo "daemon: not running"; fi
+}
+
+# The app's 2 s readout: builtin reads only, key=value lines.
+now() {
+	if is_on; then echo "state=on"; else echo "state=off"; fi
+	screen
+	battery
+	read -r P <"$BATT/capacity"
+	read -r cur <"$BATT/current_now"
+	read -r cap <"$BATT/batt_full_capacity"
+	frozen
+	pid=
+	[ -f "$PIDFILE" ] && read -r pid <"$PIDFILE" && [ -d "/proc/$pid" ] || pid=
+	g=0
+	[ -f "$GUARD" ] && g=1
+	echo "screen=$S"
+	echo "level=$P"
+	echo "status=$B"
+	echo "current=$cur"
+	echo "limit=$cap"
+	echo "frozen=${f# }"
+	echo "daemon=$pid"
+	echo "guard=$g"
 }
 
 knobs() {
@@ -414,7 +447,9 @@ knobs() {
 	for k in $KEYS; do
 		live "$k"
 		options "$k"
+		default "$k"
 		eval "echo \"$k=\$L\"; echo \"$k.want=\$v_$k\"; echo \"$k.stock=\$s_$k\""
+		echo "$k.default=$D"
 		echo "$k.options=$O"
 	done
 }
@@ -469,7 +504,12 @@ report() {
 case $1 in
 on) turn_on ;;
 off) turn_off ;;
+get) if is_on; then echo on; else echo off; fi ;;
+toggle)
+	if is_on; then turn_off && echo off; else turn_on && echo on; fi
+	;;
 status) status ;;
+now) now ;;
 knobs) knobs ;;
 apply)
 	shift
@@ -478,7 +518,7 @@ apply)
 report) report ;;
 daemon) daemon ;;
 *)
-	echo "usage: battery.sh on | off | status | knobs | apply key=value ... | report | daemon" >&2
+	echo "usage: battery.sh on | off | get | toggle | status | now | knobs | apply key=value ... | report | daemon" >&2
 	exit 2
 	;;
 esac
