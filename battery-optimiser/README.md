@@ -329,6 +329,9 @@ after 30 s of no input.
   `device_config`) and logs. Commands wake it through the fifo when the state or settings change.
   A timer that isn't a wakeup alarm doesn't wake a suspended phone, so the daemon doesn't keep
   it awake.
+- The daemon's pid file is trusted only if that process's command line is `battery.sh daemon`.
+  A pid file survives a reboot, and by then its number belongs to another process
+  (phone_cooler's daemon stopped starting because of exactly that).
 - `drain.log`: one line per screen change, charger change and daemon start:
   `<epoch s> <event> <screen> <battery status> <charge counter uAh> <level %>`. `report` adds up
   the intervals that started on battery per screen state (skipping those that end at a daemon

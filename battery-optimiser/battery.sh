@@ -591,14 +591,20 @@ hold() {
 	done
 }
 
-daemon_pid() {
-	[ -f "$PIDFILE" ] && read -r pid <"$PIDFILE" && kill -0 "$pid" 2>/dev/null && echo "$pid"
+# DPID = the daemon's pid if it runs (builtin reads only). The pid file can be left from a
+# previous boot, its number now used by another process, so the command line must be ours:
+# with `kill -0` alone a media.codec thread passed for phone_cooler's daemon, which then never
+# started again after a reboot.
+daemon_running() {
+	DPID= dc=
+	[ -f "$PIDFILE" ] && read -r DPID <"$PIDFILE" || return 1
+	read -r dc 2>/dev/null <"/proc/$DPID/cmdline"
+	case $dc in */battery.sh*daemon) ;; *) DPID= && return 1 ;; esac
 }
 
 daemon() {
-	pid=$(daemon_pid)
-	if [ -n "$pid" ] && [ "$pid" != $$ ]; then
-		echo "daemon already running (pid $pid)" >&2
+	if daemon_running && [ "$DPID" != $$ ]; then
+		echo "daemon already running (pid $DPID)" >&2
 		return 1
 	fi
 	mkdir -p "$DIR"
@@ -688,7 +694,7 @@ status() {
 	echo "screen: $S; battery: $P % $B, $cur mA now, charge limit $cap %"
 	frozen
 	echo "frozen:${f:- none}"
-	if pid=$(daemon_pid); then echo "daemon: running (pid $pid)"; else echo "daemon: not running"; fi
+	if daemon_running; then echo "daemon: running (pid $DPID)"; else echo "daemon: not running"; fi
 }
 
 # f = the frozen processes as " name(pid) ...".
@@ -711,8 +717,7 @@ now() {
 	read -r cur <"$BATT/current_now"
 	read -r cap <"$BATT/batt_full_capacity"
 	frozen
-	pid=
-	[ -f "$PIDFILE" ] && read -r pid <"$PIDFILE" && [ -d "/proc/$pid" ] || pid=
+	daemon_running
 	g=0
 	[ -f "$GUARD" ] && g=1
 	echo "screen=$S"
@@ -721,7 +726,7 @@ now() {
 	echo "current=$cur"
 	echo "limit=$cap"
 	echo "frozen=${f# }"
-	echo "daemon=$pid"
+	echo "daemon=$DPID"
 	echo "guard=$g"
 }
 
