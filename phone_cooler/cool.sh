@@ -337,8 +337,14 @@ celsius() {
 	echo "$(($1 / 1000)).$(($1 % 1000 / 100))"
 }
 
-daemon_pid() {
-	[ -f "$PIDFILE" ] && read -r pid <"$PIDFILE" && kill -0 "$pid" 2>/dev/null && echo "$pid"
+# DPID = the daemon's pid if it runs. The pid file can be left from a previous boot, its number
+# now used by another process, so the command line must be ours: with `kill -0` alone a
+# media.codec thread passed for the daemon and the daemon never started again after a reboot.
+daemon_running() {
+	DPID= dc=
+	[ -f "$PIDFILE" ] && read -r DPID <"$PIDFILE" || return 1
+	read -r dc 2>/dev/null <"/proc/$DPID/cmdline"
+	case $dc in */cool.sh*daemon) ;; *) DPID= && return 1 ;; esac
 }
 
 status() {
@@ -367,8 +373,8 @@ status() {
 		t="$t $type $(celsius "$temp")C"
 	done
 	echo "temps:$t"
-	if pid=$(daemon_pid); then
-		echo "daemon: running (pid $pid)"
+	if daemon_running; then
+		echo "daemon: running (pid $DPID)"
 	else
 		echo "daemon: not running"
 	fi
@@ -401,9 +407,8 @@ drift() {
 }
 
 daemon() {
-	pid=$(daemon_pid)
-	if [ -n "$pid" ] && [ "$pid" != $$ ]; then
-		echo "daemon already running (pid $pid)" >&2
+	if daemon_running && [ "$DPID" != $$ ]; then
+		echo "daemon already running (pid $DPID)" >&2
 		return 1
 	fi
 	mkdir -p "$DIR"

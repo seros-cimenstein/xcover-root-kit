@@ -151,6 +151,11 @@ On the phone, agents can also run
   the rules above); if so it logs `phone-cooler` to logcat and re-applies. Values below the cap
   (thermal throttling) are left alone. A round is builtin reads only and a timed `read` on a
   fifo (`/data/adb/phone-cooler/tick`) instead of `sleep`, so it forks nothing.
+- The daemon's pid file is checked against the process's command line, not with `kill -0`
+  alone. On 2026-11-03 the file still held 5224 from the 11-02 boot, which was now a
+  `media.codec` thread: `kill -0` succeeded, so every boot since then the daemon thought it was
+  already running and exited. No profile was applied after a reboot, while the tile kept
+  showing the saved one and `status` said "daemon: running".
 - The app (`dev.cooler`, ~29 KB, no permissions) is a `TileService` that runs
   `su -c '/data/adb/phone-cooler/cool.sh next'` on a background thread when tapped and
   `cool.sh get` whenever the panel shows the tile, plus the profile screen and the manual screen
