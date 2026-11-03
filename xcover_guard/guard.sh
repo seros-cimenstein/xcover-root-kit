@@ -9,6 +9,7 @@
 
 DIR=/data/adb/xcover-guard
 STATE=$DIR/state          # exists while guard mode is on; holds what to restore
+LOCK=$DIR/lock            # held while guard mode changes or the watchdog checks it
 PIDS=$DIR/listen.pid
 GRAB=$DIR/touchgrab       # holds an exclusive grab on the touchscreen (see touchgrab.c)
 # The panel driver relights the backlight whenever Android writes a brightness, even with
@@ -28,13 +29,16 @@ input_dev() {
 	' /proc/bus/input/devices
 }
 
-# Grab the touchscreen (only one grab; a dead one is replaced).
+# Run "$@" holding the lock, so a toggle (key or adb) and the watchdog never interleave.
+locked() {
+	(flock 9 && "$@") 9>"$LOCK"
+}
+
+# Grab the touchscreen (only one grab; a dead one is replaced). The grab is found by process
+# name, not a saved pid, so none can be lost track of. fd 9 (the lock) is not inherited.
 grab_touch() {
-	pid=$(sed -n 's/^grab=//p' "$STATE" 2>/dev/null)
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
-	"$GRAB" "$(input_dev sec_touchscreen)" &
-	sed -i '/^grab=/d' "$STATE"
-	echo "grab=$!" >>"$STATE"
+	pidof touchgrab >/dev/null && return 0
+	"$GRAB" "$(input_dev sec_touchscreen)" 9>&- &
 }
 
 buzz() {
@@ -66,10 +70,11 @@ guard_on() {
 }
 
 # $1 = "screen-off": the screen went off by itself (power key); no buzz then.
+# Off never leaves a grab behind, even without state: a stray one would keep the screen lit
+# but deaf to touch.
 guard_off() {
+	pkill -x touchgrab
 	[ -f "$STATE" ] || return 0
-	pid=$(sed -n 's/^grab=//p' "$STATE")
-	[ -n "$pid" ] && kill "$pid" 2>/dev/null
 	timeout=$(sed -n 's/^timeout=//p' "$STATE")
 	brightness=$(sed -n 's/^brightness=//p' "$STATE")
 	rm -f "$STATE"
@@ -87,6 +92,10 @@ guard_off() {
 	log -t xcover-guard "off${1:+ ($1)}"
 }
 
+toggle() {
+	if [ -f "$STATE" ]; then guard_off; else guard_on; fi
+}
+
 status() {
 	if [ -f "$STATE" ]; then echo "guard: on"; else echo "guard: off"; fi
 	if [ -f "$PIDS" ] && kill -0 "$(head -n1 "$PIDS")" 2>/dev/null; then
@@ -94,25 +103,35 @@ status() {
 	else
 		echo "listener: not running"
 	fi
-	pid=$(sed -n 's/^grab=//p' "$STATE" 2>/dev/null)
-	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then g=grabbed; else g=free; fi
+	if pidof touchgrab >/dev/null; then g=grabbed; else g=free; fi
 	echo "touch=$g backlight=$([ "$(cat $BLPOWER)" = 0 ] && echo on || echo off)"
 }
 
-# While on: keep the backlight off and the touchscreen grabbed (every 0.5 s), and turn guard
-# mode off if the screen goes off (checked every 2 s), so the phone is usable when woken.
+# One watchdog step, under the lock. Off: make sure no grab is left. On: keep the backlight off;
+# with $1 = check, also turn guard mode off if the screen went off, else re-grab the touchscreen.
+# Returns 1 while guard mode is off.
+watch_step() {
+	if [ ! -f "$STATE" ]; then
+		pkill -x touchgrab
+		return 1
+	fi
+	if [ "$1" = check ] && ! awake; then
+		guard_off screen-off
+		return 0
+	fi
+	[ "$(cat $BL)" = 0 ] || echo 0 >"$BL"
+	[ "$(cat $BLPOWER)" = 4 ] || echo 4 >"$BLPOWER"
+	[ "$1" = check ] && grab_touch
+	return 0
+}
+
+# While on: a step every 0.5 s, with the screen and grab checked every 2 s, so the phone is
+# usable when woken. While off: a step every 2 s.
 watchdog() {
 	n=0
 	while :; do
-		if [ -f "$STATE" ]; then
-			n=$((n + 1))
-			if [ $((n % 4)) = 0 ] && ! awake; then
-				guard_off screen-off
-			else
-				[ "$(cat $BL)" = 0 ] || echo 0 >"$BL"
-				[ "$(cat $BLPOWER)" = 4 ] || echo 4 >"$BLPOWER"
-				[ $((n % 4)) = 0 ] && grab_touch
-			fi
+		n=$((n + 1))
+		if locked watch_step $([ $((n % 4)) = 0 ] && echo check); then
 			sleep 0.5
 		else
 			n=0
@@ -131,7 +150,7 @@ listen() {
 	fi
 	echo $$ >"$PIDS"
 	# A boot or restart never leaves guard mode half on.
-	[ -f "$STATE" ] && guard_off
+	locked guard_off
 	watchdog &
 	echo $! >>"$PIDS"
 	while :; do
@@ -146,16 +165,16 @@ listen() {
 					}
 				}' |
 			while read -r _; do
-				if [ -f "$STATE" ]; then guard_off; else guard_on; fi
+				locked toggle
 			done
 		sleep 2
 	done
 }
 
 case $1 in
-on) guard_on ;;
-off) guard_off ;;
-toggle) if [ -f "$STATE" ]; then guard_off; else guard_on; fi ;;
+on) locked guard_on ;;
+off) locked guard_off ;;
+toggle) locked toggle ;;
 status) status ;;
 listen) listen ;;
 *)

@@ -17,7 +17,9 @@ Safety nets:
 - if the screen goes off (power key), guard mode ends by itself, so the phone is normal when
   you wake it;
 - a reboot always starts with guard mode off, and the saved brightness and timeout are restored;
-- darkness and the touch block are re-checked every 0.5 s while on.
+- darkness and the touch block are re-checked every 0.5 s while on;
+- while off, no touch grab is ever left running: guard off, and the watchdog every 2 s, kill any
+  `touchgrab` process, so a lit screen always takes touches.
 
 ## Install / control (from the laptop, over adb)
 
@@ -40,7 +42,11 @@ On the phone, agents can also run `su -c /data/adb/xcover-guard/guard.sh on|off|
   `EVIOCGRAB` on the `sec_touchscreen` input device, so Android's input system gets none of its
   events. Input injected by agents doesn't come from that device and still works. The driver's
   own "enabled" switch (`/sys/class/sec/tsp/input/enabled`) was tried first: it reads back 0 but
-  touches still arrive.
+  touches still arrive. The grab is found by process name (`pidof`/`pkill -x touchgrab`), not a
+  saved pid.
+- **Lock:** every switch (key, `on`/`off`/`toggle`) and every watchdog step runs under `flock` on
+  `lock`, so they never interleave. Without it, a watchdog re-grab could land between guard off's
+  kill and its state removal, leaving a grab running with the screen lit.
 - **Darkness:** the panel's `bl_power` is set to off and the raw brightness to 0. The panel driver
   relights the backlight whenever Android writes a brightness, even with `bl_power` off, so
   Android's brightness setting is also dropped to its minimum (1 of 306) and the watchdog puts
