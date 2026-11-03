@@ -17,9 +17,11 @@ Safety nets:
 - if the screen goes off (power key), guard mode ends by itself, so the phone is normal when
   you wake it;
 - a reboot always starts with guard mode off, and the saved brightness and timeout are restored;
-- darkness and the touch block are re-checked every 0.5 s while on;
-- while off, no touch grab is ever left running: guard off, and the watchdog every 2 s, kill any
-  `touchgrab` process, so a lit screen always takes touches.
+- darkness is re-checked every 0.5 s and the touch block every 2 s while on;
+- while off, no touch grab is ever left running: guard off kills any `touchgrab` process, and
+  the watchdog sweeps once more a second later, so a lit screen always takes touches.
+- the listener's pid file is checked against the process's command line before anything is
+  killed: after a reboot its old numbers belong to other processes.
 
 ## Install / control (from the laptop, over adb)
 
@@ -34,7 +36,8 @@ It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (`../
 else the only adb device. Needs root for adb's shell (Magisk: Shell allowed) and `zig` on the
 laptop to cross-compile the helper.
 
-On the phone, agents can also run `su -c /data/adb/xcover-guard/guard.sh on|off|status`.
+On the phone, agents can also run `su -c /data/adb/xcover-guard/guard.sh on|off|status`
+(`stop` stops the listener).
 
 ## How it works
 
@@ -42,11 +45,18 @@ On the phone, agents can also run `su -c /data/adb/xcover-guard/guard.sh on|off|
   `EVIOCGRAB` on the `sec_touchscreen` input device, so Android's input system gets none of its
   events. Input injected by agents doesn't come from that device and still works. The driver's
   own "enabled" switch (`/sys/class/sec/tsp/input/enabled`) was tried first: it reads back 0 but
-  touches still arrive. The grab is found by process name (`pidof`/`pkill -x touchgrab`), not a
-  saved pid.
-- **Lock:** every switch (key, `on`/`off`/`toggle`) and every watchdog step runs under `flock` on
-  `lock`, so they never interleave. Without it, a watchdog re-grab could land between guard off's
-  kill and its state removal, leaving a grab running with the screen lit.
+  touches still arrive. Grabs are found and killed by process name (`pidof`/`pkill -x
+  touchgrab`); the saved `grab.pid` only lets the watchdog see the grab alive without forking.
+- **Lock:** every switch (key, `on`/`off`/`toggle`) and every watchdog fix runs under `flock`
+  on `lock`, so they never interleave. Without it, a watchdog re-grab could land between guard
+  off's kill and its state removal, leaving a grab running with the screen lit.
+- **Watchdog cost:** while off it sleeps on a fifo (`tick`) that guard on writes to: no polling.
+  While on, the backlight is read every 0.5 s and the grab (saved pid + command line) every
+  2 s with shell builtins; only the screen check forks (`dumpsys power`, every 2 s), and the
+  lock is taken only to fix something. Measured: 0 CPU ticks in 10 s while off, 4.4 % of a
+  core while on. The earlier version polled every 2 s while off with `pkill`, `flock` and
+  subshells: 8.7 % of a core around the clock (2146 s of CPU in 7 h of uptime, 2026-11-03),
+  and about 10 % while on.
 - **Darkness:** the panel's `bl_power` is set to off and the raw brightness to 0. The panel driver
   relights the backlight whenever Android writes a brightness, even with `bl_power` off, so
   Android's brightness setting is also dropped to its minimum (1 of 306) and the watchdog puts

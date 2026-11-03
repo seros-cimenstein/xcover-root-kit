@@ -41,7 +41,7 @@ install)
 	root "$dir/guard.sh status"
 	;;
 uninstall)
-	root "$dir/guard.sh off; for p in \$(cat $dir/listen.pid 2>/dev/null); do kill \$p; done; pkill -f \"getevent -lt /dev/input/\"; rm -rf $dir $launcher"
+	root "$dir/guard.sh off; $dir/guard.sh stop; rm -rf $dir $launcher"
 	echo "removed"
 	;;
 on | off | status)
