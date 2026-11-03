@@ -26,7 +26,7 @@ STOCK=$DIR/stock      # key=value: values found before the first change, put bac
 LOG=$DIR/drain.log    # <epoch s> <event> <screen> <battery status> <charge uAh> <level %>
 PIDFILE=$DIR/daemon.pid
 TICK=$DIR/tick        # fifo: the daemon sleeps on it; commands write a line to wake it
-EXEMPT=$DIR/exempt    # "user <pkg>" / "sys <pkg>": Doze exemptions we removed, put back by keep
+EXEMPT=$DIR/exempt    # "user|add|sys <pkg>": Doze exemptions exempt/exempt_sys removed or added
 ALLOWED=$DIR/allowed  # "<pkg> <0|1> <mode>": what `allow` changed per app, undone on removal
 GUARD=/data/adb/xcover-guard/state # exists while xcover_guard's guard mode is on
 BL=/sys/class/backlight/panel/brightness
@@ -35,17 +35,19 @@ FREEZER=/dev/freezer
 FZ=$FREEZER/battery-optimiser
 POLL_S=5
 
-KEYS="wifi_scan ble_scan bluetooth screen_timeout stay_awake protect_battery doze exempt allow freeze"
+# allow comes before exempt: an app leaving allow is settled (exemption taken back, or handed
+# to exempt) before exempt sorts the user exemptions into its own and the user's.
+KEYS="wifi_scan ble_scan bluetooth screen_timeout stay_awake protect_battery fast_charge doze allow exempt exempt_sys freeze"
 # Held knobs are put back by the daemon (checked when the screen goes off); the others are
 # only applied by on/apply, so turning Bluetooth on or changing the timeout by hand sticks.
-HELD="wifi_scan ble_scan protect_battery doze exempt allow"
+HELD="wifi_scan ble_scan protect_battery fast_charge doze allow exempt exempt_sys"
 TIMEOUTS="15000 30000 60000 120000 300000 600000 1800000 2147483647"
 # Doze (DeviceIdleController, DeviceConfig namespace device_idle). Stock: light doze 1 min after
 # the screen goes off, deep doze only after 15 min inactive + 20 min idle-pending with no motion.
 # sensing_to/locating_to stay stock: on Android 13 a sensing timeout restarts the progression.
 DOZE="light_after_inactive_to=15000 light_idle_to=900000 light_max_idle_to=3600000 \
 inactive_to=30000 idle_after_inactive_to=15000 motion_inactive_to=60000"
-# System Doze exemptions that `exempt=all` removes: Google Play services (push messages wait
+# System Doze exemptions that `exempt_sys=remove` removes: Google Play services (push messages wait
 # for Doze's maintenance windows) and Samsung extras. Never removed: dialer, messages, IMS
 # (VoLTE calls), emergency alerts and SOS, clock, contacts, Knox Guard, CSC, provisioning, shell.
 SYS_EXTRA="com.google.android.gms com.android.providers.calendar com.android.providers.downloads \
@@ -56,11 +58,11 @@ com.samsung.android.bluelightfilter com.samsung.android.sdk.handwriting com.sams
 # D = optimised default of knob $1.
 default() {
 	case $1 in
-	wifi_scan | ble_scan | bluetooth | stay_awake) D=0 ;;
+	wifi_scan | ble_scan | bluetooth | stay_awake | fast_charge) D=0 ;;
 	screen_timeout) D=30000 ;;
 	protect_battery) D=1 ;;
 	doze) D=aggressive ;;
-	exempt) D=keep ;;
+	exempt | exempt_sys) D=keep ;;
 	allow) D=none ;;
 	freeze) D=mosh-client ;;
 	esac
@@ -69,11 +71,12 @@ default() {
 # O = allowed values of knob $1 (freeze: a comma list of process names, or none).
 options() {
 	case $1 in
-	wifi_scan | ble_scan | bluetooth | protect_battery) O="0 1" ;;
+	wifi_scan | ble_scan | bluetooth | protect_battery | fast_charge) O="0 1" ;;
 	screen_timeout) O=$TIMEOUTS ;;
 	stay_awake) O="0 1 2 3 4 5 6 7" ;;
 	doze) O="stock aggressive" ;;
-	exempt) O="keep apps all" ;;
+	exempt) O="keep|none|package[,package...]" ;;
+	exempt_sys) O="keep remove" ;;
 	allow) O="none|package[,package...]" ;;
 	freeze) O="none|name[,name...]" ;;
 	esac
@@ -88,6 +91,8 @@ setting() {
 	screen_timeout) T=system N=screen_off_timeout ;;
 	stay_awake) T=global N=stay_on_while_plugged_in ;;
 	protect_battery) T=global N=protect_battery ;;
+	# Samsung's "Fast charging" (9 V adaptive fast charging); 0 charges at 5 V: less current, less heat.
+	fast_charge) T=system N=adaptive_fast_charging ;;
 	*) return 1 ;;
 	esac
 }
@@ -119,10 +124,13 @@ $kv
 "*) ;; *) L=stock ;; esac
 		done
 	elif [ "$1" = exempt ]; then
-		# keep while any user exemption exists or we removed none (the file exists from the
-		# first apps/all on, even if there was nothing to remove).
+		live_exempt
+	elif [ "$1" = exempt_sys ]; then
+		# remove once every SYS_EXTRA exemption we took is still gone; with none recorded and
+		# none left (packages missing) both values look the same, so the wanted one.
 		exemptions
-		if [ -n "$EU" ] || [ ! -f "$EXEMPT" ]; then L=keep; elif [ -n "$ES" ]; then L=apps; else L=all; fi
+		records
+		if [ -n "$ES" ]; then L=keep; elif [ -n "$R_SYS" ]; then L=remove; else L=$v_exempt_sys; fi
 	elif [ "$1" = allow ]; then
 		live_allow
 	else
@@ -130,10 +138,11 @@ $kv
 	fi
 }
 
-# EU = user Doze exemptions now (apps set to "Unrestricted") except the `allow` ones, ES = the
-# SYS_EXTRA ones still exempt, WL = every exempt package (user and system); space-separated.
+# EU = user Doze exemptions now (apps set to "Unrestricted") except the `allow` ones, WU = every
+# user exemption, ES = the SYS_EXTRA ones still exempt, WL = every exempt package (user and
+# system); space-separated.
 exemptions() {
-	EU= ES= WL=
+	EU= WU= ES= WL=
 	for line in $(dumpsys deviceidle whitelist); do
 		p=${line#*,}
 		p=${p%%,*}
@@ -141,36 +150,130 @@ exemptions() {
 		user,* | system,*) WL="${WL:+$WL }$p" ;;
 		esac
 		case $line in
-		user,*) case ",$v_allow," in *",$p,"*) ;; *) EU="${EU:+$EU }$p" ;; esac ;;
+		user,*)
+			WU="${WU:+$WU }$p"
+			case ",$v_allow," in *",$p,"*) ;; *) EU="${EU:+$EU }$p" ;; esac
+			;;
 		system,*) case " $SYS_EXTRA " in *" $p "*) ES="${ES:+$ES }$p" ;; esac ;;
 		esac
 	done
 }
 
-# Exemption level $1: keep puts back everything we removed; apps removes the user exemptions;
-# all removes those and SYS_EXTRA. Going down a level puts back first, then removes. The
-# `allow` apps are never removed.
-put_exempt() {
-	if [ -f "$EXEMPT" ]; then
-		# Binder commands get </dev/null inside read loops: system_server may not use an fd of a
-		# /data/adb file (`cmd appops` failed with "Failed transaction" on one).
-		while read -r kind p; do
-			if [ "$kind" = sys ]; then dumpsys deviceidle sys-whitelist "+$p"; else dumpsys deviceidle whitelist "+$p"; fi </dev/null
-		done <"$EXEMPT" >/dev/null 2>&1
-		rm -f "$EXEMPT"
-	fi
-	[ "$1" = keep ] && return
-	: >>"$EXEMPT"
+# R_USER / R_ADD / R_SYS = what EXEMPT records: user exemptions `exempt` removed, exemptions
+# `exempt` added, SYS_EXTRA exemptions `exempt_sys` removed (space-separated).
+records() {
+	R_USER= R_ADD= R_SYS=
+	[ -f "$EXEMPT" ] || return 0
+	while read -r kind p; do
+		case $kind in
+		user) R_USER="$R_USER $p" ;;
+		add) R_ADD="$R_ADD $p" ;;
+		sys) R_SYS="$R_SYS $p" ;;
+		esac
+	done <"$EXEMPT"
+}
+
+# Writes R_USER / R_ADD / R_SYS back to EXEMPT (removed when empty).
+save_records() {
+	{
+		for p in $R_USER; do echo "user $p"; done
+		for p in $R_ADD; do echo "add $p"; done
+		for p in $R_SYS; do echo "sys $p"; done
+	} >"$EXEMPT.tmp" && mv "$EXEMPT.tmp" "$EXEMPT"
+	[ -s "$EXEMPT" ] || rm -f "$EXEMPT"
+}
+
+# L = the `exempt` packages (v_exempt) that are user-exempt now, then the other user exemptions
+# outside `allow`; "none" if empty. keep while nothing is recorded and that list isn't the
+# wanted one: the user exemptions are as found (before the first change, or one added by hand
+# since, which then differs from a wanted list either way).
+live_exempt() {
 	exemptions
+	records
+	L=
+	for p in ${v_exempt//,/ }; do
+		case " $WU " in *" $p "*) L="${L:+$L,}$p" ;; esac
+	done
 	for p in $EU; do
-		echo "user $p" >>"$EXEMPT"
-		dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
+		case ",$v_exempt," in *",$p,"*) ;; *) L="${L:+$L,}$p" ;; esac
 	done
-	[ "$1" = all ] || return 0
-	for p in $ES; do
-		echo "sys $p" >>"$EXEMPT"
-		dumpsys deviceidle sys-whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
-	done
+	L=${L:-none}
+	[ -z "$R_USER$R_ADD" ] && [ "$L" != "$v_exempt" ] && L=keep
+}
+
+# Takes back an exemption `exempt` added to package $1. An `allow` app that allow found exempt
+# (because of us) gets allow's flag instead, so taking it off `allow` removes the exemption.
+unadd() {
+	if [ -f "$ALLOWED" ] && grep -q "^$1 0 " "$ALLOWED"; then
+		while read -r p wl mode; do
+			[ "$p" = "$1" ] && wl=1
+			echo "$p $wl $mode"
+		done <"$ALLOWED" >"$ALLOWED.tmp" && mv "$ALLOWED.tmp" "$ALLOWED"
+	else
+		dumpsys deviceidle whitelist "-$1" >/dev/null 2>&1 || ERR="$ERR exempt:$1"
+	fi
+}
+
+# User Doze exemptions $1: keep puts back what we removed and takes back what we added; a
+# comma list (or none) makes exactly those packages exempt: other user exemptions are removed
+# (never the `allow` apps), missing ones added. Everything is recorded so keep/off undo it.
+put_exempt() {
+	records
+	if [ "$1" = keep ]; then
+		for p in $R_USER; do dumpsys deviceidle whitelist "+$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"; done
+		for p in $R_ADD; do unadd "$p"; done
+		R_USER= R_ADD=
+	else
+		list=${1//,/ }
+		[ "$1" = none ] && list=
+		exemptions
+		nu= na=
+		for p in $R_ADD; do
+			case " $list " in *" $p "*) na="$na $p" ;; *) unadd "$p" ;; esac
+		done
+		for p in $R_USER; do
+			case " $list " in
+			*" $p "*) dumpsys deviceidle whitelist "+$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p" ;;
+			*) nu="$nu $p" ;;
+			esac
+		done
+		# EU was read before unadd: our own additions are not the user's exemptions.
+		for p in $EU; do
+			case " $list $R_ADD " in
+			*" $p "*) ;;
+			*)
+				nu="$nu $p"
+				dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
+				;;
+			esac
+		done
+		for p in $list; do
+			case " $WU $R_USER $na " in
+			*" $p "*) ;;
+			*)
+				na="$na $p"
+				dumpsys deviceidle whitelist "+$p" >/dev/null 2>&1 || ERR="$ERR exempt:$p"
+				;;
+			esac
+		done
+		R_USER=$nu R_ADD=$na
+	fi
+	save_records
+}
+
+# SYS_EXTRA exemptions $1: keep puts back what we removed, remove removes the ones still there.
+put_exempt_sys() {
+	records
+	for p in $R_SYS; do dumpsys deviceidle sys-whitelist "+$p" >/dev/null 2>&1 || ERR="$ERR exempt_sys:$p"; done
+	R_SYS=
+	if [ "$1" = remove ]; then
+		exemptions
+		for p in $ES; do
+			R_SYS="$R_SYS $p"
+			dumpsys deviceidle sys-whitelist "-$p" >/dev/null 2>&1 || ERR="$ERR exempt_sys:$p"
+		done
+	fi
+	save_records
 }
 
 # M = RUN_ANY_IN_BACKGROUND app-op mode of package $1: ignore means "Restricted" in the app's
@@ -217,7 +320,13 @@ put_allow() {
 			case " $list " in
 			*" $p "*) echo "$p $wl $mode" >>"$ALLOWED.tmp" ;;
 			*)
-				[ "$wl" = 1 ] && dumpsys deviceidle whitelist "-$p" </dev/null >/dev/null 2>&1
+				# An app `exempt` lists stays exempt, now as exempt's addition.
+				if [ "$wl" = 1 ]; then
+					case ",$v_exempt," in
+					*",$p,"*) echo "add $p" >>"$EXEMPT" ;;
+					*) dumpsys deviceidle whitelist "-$p" </dev/null >/dev/null 2>&1 ;;
+					esac
+				fi
 				case $mode in
 				ignore | deny)
 					cmd appops set "$p" RUN_ANY_IN_BACKGROUND "$mode" </dev/null >/dev/null 2>&1 || ERR="$ERR allow:$p"
@@ -238,8 +347,8 @@ put_allow() {
 			case " $WL " in
 			*" $p "*) ;;
 			*)
-				# Removed by exempt=apps earlier: it was the user's own exemption, so it stays
-				# when it leaves the allow list again (and apps/all removes it then).
+				# Removed by `exempt` earlier: it was the user's own exemption, so it stays
+				# when it leaves the allow list again (and `exempt` removes it then if unlisted).
 				if [ -f "$EXEMPT" ] && grep -qxF "user $p" "$EXEMPT"; then
 					grep -vxF "user $p" "$EXEMPT" >"$EXEMPT.tmp"
 					mv "$EXEMPT.tmp" "$EXEMPT"
@@ -275,6 +384,8 @@ put() {
 		done
 	elif [ "$1" = exempt ]; then
 		put_exempt "$2"
+	elif [ "$1" = exempt_sys ]; then
+		put_exempt_sys "$2"
 	elif [ "$1" = allow ]; then
 		put_allow "$2"
 	fi
@@ -380,12 +491,12 @@ $k: missing value (one of: $O)"
 freeze: $v is not none or a comma list of process names" ;;
 			*) eval "v_$k=\$v" ;;
 			esac
-		elif [ "$k" = allow ]; then
-			# Installed package names, comma-separated.
-			case $v in
-			none) eval "v_$k=\$v" ;;
-			*[!A-Za-z0-9._,]* | ,* | *, | *,,*) bad="$bad
-allow: $v is not none or a comma list of package names" ;;
+		elif [ "$k" = allow ] || [ "$k" = exempt ]; then
+			# Installed package names, comma-separated (exempt: or keep).
+			case $k=$v in
+			*=none | exempt=keep) eval "v_$k=\$v" ;;
+			*=*[!A-Za-z0-9._,]* | *=,* | *, | *,,*) bad="$bad
+$k: $v is not $O" ;;
 			*)
 				[ -n "$installed" ] || installed=" $(pm list packages | sed 's/^package://' | tr '\n' ' ') "
 				miss=
@@ -394,7 +505,7 @@ allow: $v is not none or a comma list of package names" ;;
 				done
 				if [ -n "$miss" ]; then
 					bad="$bad
-allow: not installed:$miss"
+$k: not installed:$miss"
 				else
 					eval "v_$k=\$v"
 				fi
@@ -465,13 +576,16 @@ thaw() {
 	while read -r p; do echo "$p" 2>/dev/null >"$FREEZER/cgroup.procs"; done <"$FZ/cgroup.procs"
 }
 
-# Puts back held knobs that something else changed (forks; run when the screen goes off).
+# Puts back held knobs that something else changed (forks; run when the screen goes off). A knob
+# with no stock value yet (one added by an update) gets it recorded first, so `off` restores it.
 hold() {
+	load_stock
 	for k in $HELD; do
-		eval "w=\$v_$k"
+		eval "w=\$v_$k s=\$s_$k"
 		live "$k"
 		if [ "$L" != "$w" ]; then
 			log -t battery-optimiser "rewritten: $k=$L, re-applying $w"
+			[ -z "$s" ] && echo "$k=$L" >>"$STOCK"
 			put "$k" "$w"
 		fi
 	done
@@ -623,12 +737,15 @@ knobs() {
 		echo "$k.default=$D"
 		echo "$k.options=$O"
 	done
-	# exempt: the user exemptions now and what we removed (comma lists, for the app).
+	# exempt: the user exemptions now (outside allow) and what exempt removed or added;
+	# exempt_sys: what it removed (comma lists, for the app).
 	exemptions
-	r=
-	[ -f "$EXEMPT" ] && while read -r kind p; do r="${r:+$r,}$p"; done <"$EXEMPT"
+	records
 	echo "exempt.apps=${EU// /,}"
-	echo "exempt.removed=$r"
+	r=${R_USER# } a=${R_ADD# } s=${R_SYS# }
+	echo "exempt.removed=${r// /,}"
+	echo "exempt.added=${a// /,}"
+	echo "exempt_sys.removed=${s// /,}"
 }
 
 # Discharge per screen state from the log: the interval between two lines counts for the

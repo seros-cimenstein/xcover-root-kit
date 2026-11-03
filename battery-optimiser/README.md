@@ -8,9 +8,10 @@ while the screen is off and logs the drain per screen state so the result can be
 
 By default everything the remote-control setup needs keeps working: Tailscale, adb over
 Tailscale (`../remote_control`), DevDeck/DevDeck+, Termux and PhoneDeck are on the user Doze
-whitelist, so the stronger Doze doesn't cut their network. For the most battery, `exempt=apps`
-(or `all`) takes those exemptions away too, at the price of remote control while the phone
-sleeps (see [Doze exemptions](#doze-exemptions)). CPU/GPU clocks are `../phone_cooler`'s job;
+whitelist, so the stronger Doze doesn't cut their network. For the most battery, `exempt`
+(the apps you tick as Doze-exempt) can take those exemptions away too, at the price of remote
+control while the phone sleeps (see [Doze exemptions](#doze-exemptions)). CPU/GPU clocks are
+`../phone_cooler`'s job;
 nothing here touches them.
 
 ```
@@ -43,8 +44,13 @@ Forever); until then it shows "No root".
   - **Settings**: every knob with its allowed values, plus "now" and "stock" under each. Nothing
     changes until **Apply**, which saves them as the optimised values and turns the optimiser on;
     **Defaults** fills in the built-in optimised values (press Apply to use them). Errors from
-    `battery.sh` show above the buttons. The **Doze exemptions** card (Keep / Apps / All) also
-    lists the apps exempt now and the exemptions the optimiser removed. **Keep these apps
+    `battery.sh` show above the buttons. **What is Doze?** (tap to open) explains Doze, its two
+    stages, what still works while it sleeps and what an exemption is; the Doze cards spell out
+    each option. **Doze exemptions: apps** opens a list of the launcher
+    apps to tick: ticked ones stay or become Doze-exempt, unticked ones lose it (the `exempt`
+    knob; until you choose, it shows the apps exempt "as found"), with the apps exempt now and
+    what the optimiser removed or added. **Doze exemptions: Google and Samsung** (Keep / Remove)
+    is `exempt_sys`. **Keep these apps
     running** opens a list of the launcher apps to tick (the `allow` knob) and shows which of
     them are Unrestricted now.
 - **Quick Settings tile "Battery"**: pull the panel down twice, tap the pencil, drag Battery in.
@@ -101,10 +107,12 @@ A phone in deep sleep draws well under 20 mA, so the screen-off drain was the pr
 | `ble_scan` | `global ble_scan_always_enabled` | 1 | 0 | stops apps scanning Bluetooth LE while Bluetooth is off | yes |
 | `bluetooth` | `cmd bluetooth_manager enable/disable` | on | off | nothing is paired; ends Google Play services' constant LE scanning | no |
 | `screen_timeout` | `system screen_off_timeout` | never | 30000 (30 s) | with "never" the panel stayed lit until the power button; the screen-on average was 426 mA | no |
-| `stay_awake` | `global stay_on_while_plugged_in` | 7 | 0 | screen off while charging: less power and less heat in the charging cell | no |
+| `stay_awake` | `global stay_on_while_plugged_in` | 7 | 0 | the screen goes off while charging instead of staying lit; it also lifts Samsung's ~1.2 A screen-on charge limit, so `fast_charge` matters (see [Charging heat](#charging-heat)) | no |
 | `protect_battery` | `global protect_battery` | 0 | 1 | Samsung's "Protect battery": charging stops at 85 % (`batt_full_capacity`) | yes |
+| `fast_charge` | `system adaptive_fast_charging` | 1 | 0 | Samsung's "Fast charging": off charges at 5 V instead of 9 V, so less current and heat while charging (see [Charging heat](#charging-heat)) | yes |
 | `doze` | DeviceConfig `device_idle` | stock | aggressive | deep Doze about 2 minutes after the screen goes off instead of 35 min at the earliest | yes |
-| `exempt` | Doze whitelist (`dumpsys deviceidle whitelist` / `sys-whitelist`) | keep | keep | `apps`/`all` take Doze exemptions away for the most battery (see below) | yes |
+| `exempt` | user Doze whitelist (`dumpsys deviceidle whitelist`) | keep | keep | the apps you list are Doze-exempt, every other user exemption is taken away (see below) | yes |
+| `exempt_sys` | system Doze whitelist (`dumpsys deviceidle sys-whitelist`) | keep | keep | `remove` takes Google Play services' and Samsung extras' exemptions away (see below) | yes |
 | `allow` | Doze whitelist + app-op `RUN_ANY_IN_BACKGROUND` | none | none | apps you pick stay "Unrestricted", whatever `exempt` says (see below) | yes |
 | `freeze` | cgroup freezer | none | `mosh-client` | processes frozen while the screen is off (see below) | daemon |
 
@@ -113,15 +121,19 @@ screen goes off). `protect_battery` is also watched through the kernel limit eve
 since Samsung turns it off by itself after a long time on the charger; the daemon toggles the
 setting once to make BatteryService write 85 again. The others are applied once by `on`/`apply`: turning
 Bluetooth on for headphones or changing the timeout in Settings sticks. To keep a different
-value, set it as the optimised value: `./install.sh apply bluetooth=1`.
+value, set it as the optimised value: `./install.sh apply bluetooth=1`. A held knob added by an
+update is first applied by the daemon at its start, which records its stock value too, so
+`off` restores it.
 
 Allowed values (`./install.sh knobs` lists them):
 
-- `wifi_scan`, `ble_scan`, `bluetooth`, `protect_battery`: 0 or 1.
+- `wifi_scan`, `ble_scan`, `bluetooth`, `protect_battery`, `fast_charge`: 0 or 1.
 - `screen_timeout`: 15000, 30000, 60000, 120000, 300000, 600000, 1800000, 2147483647 (never), ms.
 - `stay_awake`: 0..7, a bit mask (1 AC, 2 USB, 4 wireless).
 - `doze`: `stock` or `aggressive`.
-- `exempt`: `keep`, `apps` or `all`.
+- `exempt`: `keep` (user exemptions as found), `none`, or a comma list of installed package
+  names that are Doze-exempt, e.g. `exempt=com.tailscale.ipn,com.termux`.
+- `exempt_sys`: `keep` or `remove`.
 - `allow`: `none`, or a comma list of installed package names, e.g.
   `allow=com.brave.browser` (anything not installed is rejected).
 - `freeze`: `none`, or a comma list of process names as in `/proc/<pid>/comm` (at most 15
@@ -165,31 +177,38 @@ wakelocks while the phone is in Doze. Found on this phone:
   one-handed mode, blue light filter, handwriting, video, adaptive brightness), plus the
   calendar and download providers and the shell.
 
-| `exempt` | what loses the exemption | what stops while the phone sleeps |
+| knob | what loses the exemption | what stops while the phone sleeps |
 |---|---|---|
-| `keep` (default) | nothing | nothing new |
-| `apps` | all user exemptions | adb over Tailscale, DevDeck/DevDeck+ links and agent notifications, mosh, PhoneDeck, Termux jobs: until the screen comes on or a maintenance window |
-| `all` | user exemptions, plus Google Play services, calendar and download providers and the Samsung extras above | also push messages (WhatsApp, banks, Gmail) and Google sync: they wait for a maintenance window (light Doze every 15 min to 1 h, deep Doze every 1 h growing to 6 h) |
+| `exempt=keep` (default) | nothing | nothing new |
+| `exempt=<list>` | every user exemption not in the list (the list's apps are made exempt) | for the unlisted ones of Tailscale, DevDeck/DevDeck+, Termux, PhoneDeck: adb over Tailscale, the DevDeck links and agent notifications, mosh, Termux jobs, until the screen comes on or a maintenance window |
+| `exempt=none` | all user exemptions | all of the above |
+| `exempt_sys=remove` | Google Play services, calendar and download providers and the Samsung extras above | push messages (WhatsApp, banks, Gmail) and Google sync: they wait for a maintenance window (light Doze every 15 min to 1 h, deep Doze every 1 h growing to 6 h) |
 
 Never removed: dialer, messages, IMS, emergency alerts, SOS (safety assurance), clock, contacts,
 Knox Guard, CSC, provisioning and shell, so calls, SMS, alarms and emergency alerts keep working.
+The `allow` apps are never removed either.
 
-`apps`/`all` record each exemption they remove in `/data/adb/battery-optimiser/exempt`; `keep`
-(and `off`) put exactly those back. The knob is held: an app made "Unrestricted" again (by hand,
-or an app asking for it) loses it at the next screen-off while `apps`/`all` is set. To keep
-one app exempt anyway, add it to `allow`.
+Both knobs record what they change in `/data/adb/battery-optimiser/exempt`: `user <pkg>` (a
+user exemption removed), `add <pkg>` (an exemption added for the list), `sys <pkg>` (a system
+one removed); `keep` (and `off`) put exactly those back and take the added ones away again. An
+app leaving `allow` that `exempt` lists stays exempt (its record moves to `exempt`), and the
+other way round. Both knobs are held: an app made "Unrestricted" by hand (or by an app asking
+for it) that isn't listed loses it at the next screen-off. `allow` is applied before `exempt`,
+so an app moving between the two in one apply is never mistaken for one of your own
+exemptions.
 
-With `apps`, Tailscale keeps running, but Android's Doze network rules block a non-exempt app
+With Tailscale unlisted, it keeps running, but Android's Doze network rules block a non-exempt app
 from light Doze on (15 s after the screen goes off with the `aggressive` constants), so the
 laptop loses adb until the screen comes on or a maintenance window opens. Verified on the phone:
-after `apps`, netpolicy no longer lists `POWER_SAVE_ALLOWLIST` for Tailscale's or Termux's uid;
-after `all`, not for Google Play services either; after `keep`, all of them have it again.
+with all user exemptions removed, netpolicy no longer lists `POWER_SAVE_ALLOWLIST` for Tailscale's
+or Termux's uid; with the system ones removed too, not for Google Play services either; after
+`keep`, all of them have it again.
 
 ### Apps you keep running (`allow`)
 
 Every package in `allow` is made "Unrestricted", as in the app's battery settings: it gets a
 user Doze exemption and its `RUN_ANY_IN_BACKGROUND` app-op is set back to allowed if it was
-`ignore`. `exempt=apps`/`all` never remove these. Taking an app off the list undoes exactly what
+`ignore`. `exempt` never removes these. Taking an app off the list undoes exactly what
 was changed for it (recorded in `/data/adb/battery-optimiser/allowed` as
 `<package> <1 if we added the exemption> <app-op mode before>`): an app that was Restricted
 before is Restricted again. The knob is held: if something restricts the app again, the
@@ -227,6 +246,33 @@ so a process thaws at most 5 s after the screen comes on. Samsung's "early wake-
 as on too: at 13:31:14 the log shows 11 s "on" while Doze, which only looks at the interactive
 state, stayed idle.
 
+### Charging heat
+
+After the optimiser went on, charging got noticeably warmer. Samsung's saved batterystats
+(`/data/log/batterystats`, one file per charge cycle, about a day of history each) show why. The
+charger was the same 9 V fast charger throughout (`online=6`, Samsung's 9 V TA cable type):
+
+| charge | screen | into the battery | battery temp | skin max |
+|---|---|---|---|---|
+| 10-23 12:28 (before) | on 95 % | 1.2 A | 32.5 to 34.5 °C | 39 °C |
+| 10-23 19:39 (before) | off | 1.5 A | 31.1 to 33.1 °C | 37 °C |
+| 10-31 21:54 | off | 2.3 A for 47 min | 32.5 to 35.5 °C | 42 °C |
+| 11-01 12:12 | on | 1.2 A | 32.7 °C | 35 °C |
+| 11-02 16:05 | off | 2.6 A | 31.1 to 34.1 °C in 18 min | 41 °C |
+
+With the screen on, Samsung caps the charge current at about 1.2 A (bit `0x200` set in
+batterystats' `current_event` on every screen-on stretch). With `stay_awake=7` the screen stayed
+lit while plugged in, so the phone mostly charged at that cap. With `stay_awake=0` and a 30 s
+timeout, the screen goes off and fast charging runs at 2.3 to 2.7 A, about twice the current
+and roughly four times the heat in the cell (I²R). The 10-23 screen-off charge also ran at only
+1.5 A on the same cable type; nothing in the logs explains it (a different charger or cable
+would). None of it reached a battery temperature Samsung acts on: 35.5 °C was the highest.
+
+`fast_charge=0` turns Samsung's "Fast charging" off (`system adaptive_fast_charging`). Samsung
+passes it to the charger driver at once: `/sys/class/sec/switch/afc_disable` went 0 to 1 and
+back with the setting (tested unplugged). With it off, the charger stays at 5 V. Its current
+and temperature are still to be measured on the next charge.
+
 ### Screen timeout and guard mode
 
 Guard mode sets the timeout to "never" and puts its saved value back when it ends. While guard
@@ -244,9 +290,9 @@ after 30 s of no input.
   the switching energy of one at 598 MHz: the bottom of the little cluster is not yet at a
   voltage floor where running faster would be free.
 - **Undervolting**: not possible on the stock kernel (see phone_cooler's Limits).
-- **Tailscale, adb, DevDeck+** (with `exempt=keep`): the largest remaining drain is the always-on
+- **Tailscale, adb, DevDeck+** (while `exempt` lists them): the largest remaining drain is the always-on
   Tailscale link over LTE. Its keepalives, adb sessions and DevDeck+'s link (pings every 10 s
-  while visible, every 10 min when hidden) are what remote control needs; `exempt=apps` stops
+  while visible, every 10 min when hidden) are what remote control needs; unlisting them stops
   them while the phone sleeps. Wi-Fi is far cheaper than LTE for the same link (in the stats
   above: Wi-Fi 21 mAh for 8 h connected; LTE radio 3157 mAh), so being on Wi-Fi is the biggest
   thing left.

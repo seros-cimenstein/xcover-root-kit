@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -40,6 +41,14 @@ public class MainActivity extends Activity {
             {"protect_battery", "Protect battery",
                     "Charging stops at 85 % (Samsung's own limit). The cell ages much slower.",
                     "0|1", "Off|On (85 %)"},
+            {"fast_charge", "Fast charging",
+                    "Samsung's Fast charging (9 V charger).\n"
+                            + "Off: charges at 5 V. Less current into the battery, so it stays cooler while "
+                            + "charging and ages slower, but charging takes longer.\n"
+                            + "On: up to about 2.7 A into the battery with the screen off; it gets warm. "
+                            + "Samsung limits charging to about 1.2 A while the screen is on either way.\n"
+                            + "If the phone is charging when you change it, plug it in again.",
+                    "0|1", "Off|On"},
             {"screen_timeout", "Screen timeout",
                     "The screen is the biggest drain while it is on.",
                     "15000|30000|60000|120000|300000|600000|1800000|2147483647",
@@ -48,17 +57,22 @@ public class MainActivity extends Activity {
                     "Keeps the screen on while plugged in: more power, and heat in the charging battery.",
                     "0|1|2|3|4|5|6|7", "Never|AC|USB|AC+USB|Wireless|AC+Wl|USB+Wl|Always"},
             {"doze", "Doze",
-                    "Aggressive: deep sleep about 2 min after the screen goes off (stock: 35 min or more). "
-                            + "Apps with a Doze exemption (below) keep their network while it sleeps.",
+                    "When Doze starts after the screen goes off.\n"
+                            + "Stock: Samsung's timings: light Doze after 1 min, deep Doze only after 35 min or "
+                            + "more with the phone lying still.\n"
+                            + "Aggressive: light Doze after 15 s, deep Doze about 2 min after the screen goes off "
+                            + "if the phone lies still. Most of the screen-off saving comes from this.",
                     "stock|aggressive", "Stock|Aggressive"},
-            {"exempt", "Doze exemptions",
-                    "Keep: Tailscale, DevDeck, Termux, Termius and PhoneDeck stay exempt, so remote control "
-                            + "works with the screen off. Apps: they lose it; best for battery, but adb over "
-                            + "Tailscale, DevDeck, mosh and PhoneDeck stop while the phone sleeps and come back "
-                            + "when the screen turns on. All: also Google Play services and Samsung extras; "
-                            + "push messages (WhatsApp, banks) then wait for Doze's maintenance windows. "
-                            + "Calls, SMS, alarms and emergency alerts are never touched.",
-                    "keep|apps|all", "Keep|Apps|All"},
+            {"exempt_sys", "Doze exemptions: Google and Samsung",
+                    "System apps that Doze leaves alone.\n"
+                            + "Keep: they stay exempt, as Samsung set them.\n"
+                            + "Remove: Google Play services, the calendar and download providers and the Samsung "
+                            + "extras (screenshots, file sharing, one-handed mode, blue light filter, handwriting, "
+                            + "video, adaptive brightness) lose their exemption. Push messages (WhatsApp, banks, "
+                            + "Gmail) and Google sync then wait for the next maintenance window. More battery, "
+                            + "later messages.\n"
+                            + "Never touched either way: calls, SMS, alarms, emergency alerts, contacts.",
+                    "keep|remove", "Keep|Remove"},
             {"wifi_scan", "Wi-Fi scanning",
                     "Location scans for Wi-Fi networks even while Wi-Fi is off.",
                     "0|1", "Off|On"},
@@ -69,9 +83,25 @@ public class MainActivity extends Activity {
                     "Set once on Apply; turning it on in Settings for headphones sticks.",
                     "0|1", "Off|On"},
     };
-    private static final String FREEZE = "freeze", ALLOW = "allow";
+    private static final String FREEZE = "freeze", ALLOW = "allow", EXEMPT = "exempt";
     private static final Pattern FREEZE_OK = Pattern.compile("none|[A-Za-z0-9._:-]+(,[A-Za-z0-9._:-]+)*");
     private static final Pattern PACKAGE_OK = Pattern.compile("[A-Za-z0-9._]+");
+    private static final String DOZE_INFO =
+            "Doze is Android's sleep for apps. While the screen is off, Android holds apps back so the CPU "
+                    + "and the mobile radio can sleep: no network, their jobs and syncs wait. Every so often "
+                    + "it opens a short maintenance window in which apps catch up, then sleeps again.\n\n"
+                    + "Light Doze starts soon after the screen goes off, even in a pocket. Maintenance windows "
+                    + "come every 15 min, growing to 1 h (with Aggressive).\n\n"
+                    + "Deep Doze starts once the phone also lies still. It also ignores apps' wakelocks and "
+                    + "delays their ordinary alarms. Windows come every 1 h, growing to 6 h. Picking the phone "
+                    + "up or turning the screen on ends it at once.\n\n"
+                    + "Still working while it sleeps: calls, SMS, the alarms you set, and high-priority push "
+                    + "messages (WhatsApp, banks) while Google Play services is exempt.\n\n"
+                    + "Exemptions: an exempt app (\"Unrestricted\" in its battery settings) is not held back. "
+                    + "It keeps its network, jobs and wakelocks while the phone sleeps. Fewer exemptions save "
+                    + "more battery, but those apps stop while the screen is off, until it comes on or a "
+                    + "maintenance window opens. Tailscale needs one for adb, DevDeck and mosh to reach the "
+                    + "phone while it sleeps.";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     /** One worker, so commands never overlap. */
@@ -80,11 +110,12 @@ public class MainActivity extends Activity {
     private final Map<String, String> defaults = new HashMap<>();
     private final Map<String, TextView[]> segments = new HashMap<>();
     private final Map<String, TextView> notes = new HashMap<>();
-    /** Packages chosen for the allow knob (kept running), in the order shown. */
-    private final List<String> allow = new ArrayList<>();
+    /** Apps kept running (allow) and apps exempt from Doze (exempt). */
+    private final AppList allow = new AppList(ALLOW, "Keep these apps running"),
+            exempt = new AppList(EXEMPT, "Doze exemptions: apps");
     private Ui ui;
     private LinearLayout powerCard;
-    private TextView powerTitle, powerText, statusLine, message, report, freezeNote, allowList, allowNote;
+    private TextView powerTitle, powerText, statusLine, message, report, freezeNote;
     private TextView level, current, limit, screen, extra;
     private EditText freeze;
     private boolean on, busy, visible, loaded;
@@ -100,6 +131,41 @@ public class MainActivity extends Activity {
             main.postDelayed(this, REFRESH_MS);
         }
     };
+
+    /** An app-list knob (allow, exempt): the chosen apps' names and a picker of the launcher apps. */
+    private final class AppList {
+        final String key, title;
+        /** Packages chosen, in the order shown. */
+        final List<String> pkgs = new ArrayList<>();
+        /** exempt only: the value is "keep", the user exemptions stay as found ({@link #found}). */
+        boolean keep;
+        /** exempt: the user exemptions now (outside allow), ticked in the picker while keep. */
+        final List<String> found = new ArrayList<>();
+        TextView names, note;
+
+        AppList(String key, String title) {
+            this.key = key;
+            this.title = title;
+        }
+
+        void set(String v) {
+            keep = "keep".equals(v);
+            pkgs.clear();
+            if (!keep) pkgs.addAll(packages(v));
+        }
+
+        String value() {
+            return keep ? "keep" : pkgs.isEmpty() ? "none" : String.join(",", pkgs);
+        }
+
+        List<String> ticked() {
+            return keep ? found : pkgs;
+        }
+
+        void paint() {
+            names.setText(keep ? "As found: " + labels(found) : labels(pkgs));
+        }
+    }
 
     @Override
     protected void onCreate(Bundle state) {
@@ -151,8 +217,22 @@ public class MainActivity extends Activity {
 
         ui.header(root, "SETTINGS (OPTIMISED VALUES)", 16);
         for (String[] k : KNOBS) {
+            if (k[0].equals("doze")) infoCard(root, "What is Doze?", DOZE_INFO);
+            if (k[0].equals("exempt_sys")) appCard(root, exempt,
+                    "Your apps that Doze leaves alone.\n"
+                            + "Ticked: stays exempt (or becomes it): keeps its network, jobs and wakelocks while "
+                            + "the phone sleeps.\n"
+                            + "Unticked: loses its exemption and sleeps with the phone until the screen comes on "
+                            + "or a maintenance window. Untick Tailscale, DevDeck, Termux or PhoneDeck and remote "
+                            + "control stops while the phone sleeps.\n"
+                            + "As found (Defaults): exemptions stay as they were before the optimiser.\n"
+                            + "Apps in Keep these apps running (below) are always exempt.");
             knob(root, k);
-            if (k[0].equals("exempt")) allowCard(root);
+            if (k[0].equals("exempt_sys")) appCard(root, allow,
+                    "Made Unrestricted: exempt from Doze, and Android's background restriction is lifted too "
+                            + "(Android kills a restricted app soon after it goes to the background, which cuts "
+                            + "Brave's background play). Use it for apps that must keep working in the "
+                            + "background. They cost battery while they do.");
         }
         freezeCard(root);
 
@@ -219,6 +299,24 @@ public class MainActivity extends Activity {
         c.addView(d);
     }
 
+    /** A card whose title shows or hides an explanation when tapped (closed at first). */
+    private void infoCard(LinearLayout parent, String title, String body) {
+        LinearLayout c = card(parent);
+        c.setClickable(true);
+        c.setFocusable(true);
+        TextView head = ui.text(title + "   ▾", 17, Ui.ACCENT, true);
+        c.addView(head);
+        TextView text = ui.text(body, 13.5f, Ui.FG, false);
+        text.setPadding(0, ui.dp(8), 0, 0);
+        text.setVisibility(View.GONE);
+        c.addView(text);
+        c.setOnClickListener(v -> {
+            boolean open = text.getVisibility() != View.VISIBLE;
+            text.setVisibility(open ? View.VISIBLE : View.GONE);
+            head.setText(title + (open ? "   ▴" : "   ▾"));
+        });
+    }
+
     /** A knob card: title, description, its values as segments (rows of four), now/stock line. */
     private void knob(LinearLayout parent, String[] k) {
         String key = k[0];
@@ -256,25 +354,21 @@ public class MainActivity extends Activity {
         paintKnob(key);
     }
 
-    /** The allow knob: apps made Unrestricted, picked from the launcher apps. */
-    private void allowCard(LinearLayout parent) {
+    /** An app-list card: the chosen apps and a button to pick them from the launcher apps. */
+    private void appCard(LinearLayout parent, AppList a, String desc) {
         LinearLayout c = card(parent);
-        cardHead(c, "Keep these apps running",
-                "Made Unrestricted: exempt from Doze and never background-restricted (Android kills a "
-                        + "restricted app soon after it goes to the background, which cuts Brave's background "
-                        + "play). They stay exempt with Doze exemptions on Apps or All, and cost battery while "
-                        + "they work in the background.");
-        allowList = ui.text("None", 15, Ui.FG, true);
-        c.addView(allowList);
+        cardHead(c, a.title, desc);
+        a.names = ui.text("None", 15, Ui.FG, true);
+        c.addView(a.names);
         TextView choose = ui.button("Choose apps", false);
-        choose.setOnClickListener(v -> chooseApps());
+        choose.setOnClickListener(v -> chooseApps(a));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.setMargins(0, ui.dp(10), 0, 0);
         c.addView(choose, lp);
-        allowNote = ui.text("", 12, Ui.MUTED, false);
-        allowNote.setPadding(ui.dp(4), ui.dp(6), 0, 0);
-        c.addView(allowNote);
+        a.note = ui.text("", 12, Ui.MUTED, false);
+        a.note.setPadding(ui.dp(4), ui.dp(6), 0, 0);
+        c.addView(a.note);
     }
 
     /** App label of a package, or the package name if it can't be resolved. */
@@ -294,13 +388,10 @@ public class MainActivity extends Activity {
         return b.toString();
     }
 
-    private void paintAllow() {
-        allowList.setText(labels(allow));
-    }
-
-    /** Lists the launcher apps (plus any chosen ones that aren't) off the main thread, then the picker. */
-    private void chooseApps() {
+    /** Lists the launcher apps (plus any ticked ones that aren't) off the main thread, then the picker. */
+    private void chooseApps(AppList a) {
         if (!loaded) return;
+        List<String> ticked = new ArrayList<>(a.ticked());
         new Thread(() -> {
             PackageManager pm = getPackageManager();
             Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
@@ -311,26 +402,27 @@ public class MainActivity extends Activity {
                 if (p.equals(getPackageName()) || !seen.add(p)) continue;
                 apps.add(new String[]{ri.loadLabel(pm).toString(), p});
             }
-            for (String p : allow) if (seen.add(p)) apps.add(new String[]{appLabel(p), p});
-            apps.sort((a, b) -> a[0].compareToIgnoreCase(b[0]));
-            runOnUiThread(() -> showPicker(apps));
+            for (String p : ticked) if (seen.add(p)) apps.add(new String[]{appLabel(p), p});
+            apps.sort((x, y) -> x[0].compareToIgnoreCase(y[0]));
+            runOnUiThread(() -> showPicker(a, ticked, apps));
         }).start();
     }
 
-    private void showPicker(List<String[]> apps) {
+    private void showPicker(AppList a, List<String> ticked, List<String[]> apps) {
         String[] names = new String[apps.size()];
         boolean[] checked = new boolean[apps.size()];
         for (int i = 0; i < apps.size(); i++) {
             names[i] = apps.get(i)[0];
-            checked[i] = allow.contains(apps.get(i)[1]);
+            checked[i] = ticked.contains(apps.get(i)[1]);
         }
         new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                .setTitle("Keep these apps running")
+                .setTitle(a.title)
                 .setMultiChoiceItems(names, checked, (d, which, isChecked) -> checked[which] = isChecked)
                 .setPositiveButton("OK", (d, w) -> {
-                    allow.clear();
-                    for (int i = 0; i < apps.size(); i++) if (checked[i]) allow.add(apps.get(i)[1]);
-                    paintAllow();
+                    a.keep = false;
+                    a.pkgs.clear();
+                    for (int i = 0; i < apps.size(); i++) if (checked[i]) a.pkgs.add(apps.get(i)[1]);
+                    a.paint();
                     say("Press Apply to use them.", Ui.ACCENT);
                 })
                 .setNegativeButton("Cancel", null)
@@ -436,9 +528,8 @@ public class MainActivity extends Activity {
             defaults.put(key, k.get(key + ".default"));
             String stock = k.get(key + ".stock");
             String extra = "";
-            if (key.equals("exempt")) {
-                String apps = k.get("exempt.apps"), removed = k.get("exempt.removed");
-                if (apps != null && !apps.isEmpty()) extra += "\nexempt now: " + apps.replace(",", ", ");
+            if (key.equals("exempt_sys")) {
+                String removed = k.get("exempt_sys.removed");
                 if (removed != null && !removed.isEmpty()) extra += "\nremoved: " + removed.replace(",", ", ");
             }
             notes.get(key).setText("now: " + label(key, k.get(key))
@@ -448,10 +539,17 @@ public class MainActivity extends Activity {
         freeze.setText(k.get(FREEZE + ".want"));
         defaults.put(FREEZE, k.get(FREEZE + ".default"));
         freezeNote.setText("default: " + k.get(FREEZE + ".default"));
-        allow.clear();
-        allow.addAll(packages(k.get(ALLOW + ".want")));
-        paintAllow();
-        allowNote.setText("unrestricted now: " + labels(packages(k.get(ALLOW))));
+        allow.set(k.get(ALLOW + ".want"));
+        allow.paint();
+        allow.note.setText("unrestricted now: " + labels(packages(k.get(ALLOW))));
+        exempt.found.clear();
+        exempt.found.addAll(packages(k.get(EXEMPT + ".apps")));
+        exempt.set(k.get(EXEMPT + ".want"));
+        exempt.paint();
+        String removed = k.get(EXEMPT + ".removed"), added = k.get(EXEMPT + ".added");
+        exempt.note.setText("exempt now: " + labels(exempt.found)
+                + (removed == null || removed.isEmpty() ? "" : "\nremoved: " + labels(packages(removed)))
+                + (added == null || added.isEmpty() ? "" : "\nadded: " + labels(packages(added))));
         paintPower();
     }
 
@@ -516,8 +614,10 @@ public class MainActivity extends Activity {
             paintKnob(s[0]);
         }
         freeze.setText(defaults.get(FREEZE));
-        allow.clear();
-        paintAllow();
+        allow.set("none");
+        allow.paint();
+        exempt.set("keep");
+        exempt.paint();
         say("Defaults filled in: press Apply to use them.", Ui.ACCENT);
     }
 
@@ -529,17 +629,20 @@ public class MainActivity extends Activity {
             say("Freeze: none, or process names separated by commas (letters, digits, . _ : -).", Ui.HOT);
             return;
         }
-        for (String p : allow) {
-            if (!PACKAGE_OK.matcher(p).matches()) {
-                say("Keep running: bad package name " + p, Ui.HOT);
-                return;
+        for (AppList a : new AppList[]{exempt, allow}) {
+            for (String p : a.pkgs) {
+                if (!PACKAGE_OK.matcher(p).matches()) {
+                    say(a.title + ": bad package name " + p, Ui.HOT);
+                    return;
+                }
             }
         }
         // Every value is a table entry or matched FREEZE_OK / PACKAGE_OK, so the line is shell-safe.
         StringBuilder args = new StringBuilder("apply");
         for (String[] s : KNOBS) args.append(' ').append(s[0]).append('=').append(chosen.get(s[0]));
         args.append(' ').append(FREEZE).append('=').append(f);
-        args.append(' ').append(ALLOW).append('=').append(allow.isEmpty() ? "none" : String.join(",", allow));
+        args.append(' ').append(EXEMPT).append('=').append(exempt.value());
+        args.append(' ').append(ALLOW).append('=').append(allow.value());
         setBusy(true);
         say("Applying...", Ui.MUTED);
         worker.execute(() -> {
