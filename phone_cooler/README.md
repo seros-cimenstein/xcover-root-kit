@@ -29,8 +29,9 @@ Cooler app > **Custom** card opens the manual screen. The live readout (temperat
 now / max per cluster and GPU, online cores) stays at the top and refreshes every 2 s; the
 controls scroll below it. Nothing changes until **Apply**, which saves the settings and switches
 to the Custom profile; errors from `cool.sh` are shown above the buttons. **Reset to stock**
-fills in the stock values (press Apply to use them). The screen shows the saved custom
-settings, or the current ones before anything was saved.
+fills in the stock values (press Apply to use them). The screen starts from the profile in use:
+coming from Cold it shows Cold's clocks (stock for everything else), on Custom the saved custom
+settings.
 
 | knob (`cool.sh` key) | values offered | effect | stock |
 |---|---|---|---|
@@ -65,14 +66,14 @@ Safety limits, enforced by `cool.sh` (the app applies the same rules before send
 From a shell (on the phone as root, or `./install.sh knobs|apply` from the laptop):
 
 ```
-cool.sh knobs          # one call: key=<live>, key.options=<allowed>, key.stock=, key.saved= (if saved)
+cool.sh knobs          # one call: key=<live>, key.options=<allowed>, key.stock=, key.want=<profile in use>
 cool.sh apply big_max=1664000 big_min=936000 cpu7=0 gpu_max=546000 little_governor=performance
 cool.sh set custom     # back to the saved custom settings after a preset
 ```
 
-`apply` changes only the named knobs; the rest keep their saved custom values (the first time:
-the values of the profile in use). Custom settings live in `/data/adb/phone-cooler/custom`
-(`key=value` lines).
+`apply` changes only the named knobs; the rest keep the values of the profile in use (on
+Custom the saved custom values, on a preset that preset's). Custom settings live in
+`/data/adb/phone-cooler/custom` (`key=value` lines).
 
 ### What can't be changed
 

@@ -8,9 +8,9 @@
 #   cool.sh next                     cycle off -> mild -> cool -> cold [-> custom] -> off, print it
 #   cool.sh status                   profile, clocks, online cores and temperatures
 #   cool.sh knobs                    every knob: key=live value, key.options=allowed values,
-#                                    key.stock=stock value, key.saved=custom value (if saved)
-#   cool.sh apply key=value ...      change custom settings (unnamed knobs keep their saved
-#                                    value), apply them and switch to the custom profile
+#                                    key.stock=stock value, key.want=value of the profile in use
+#   cool.sh apply key=value ...      change custom settings (unnamed knobs keep the value of the
+#                                    profile in use), apply them and switch to the custom profile
 #   cool.sh daemon                   apply the remembered profile and keep it applied
 #                                    (started at boot from /data/adb/service.d/phone-cooler.sh)
 #
@@ -265,15 +265,11 @@ set_profile() {
 }
 
 # apply key=value ...: validates everything first; nothing is written unless all of it is valid.
+# Starts from the profile in use (the saved custom settings, or a preset's values).
 apply_custom() {
 	tables
-	if [ -f "$CUSTOM" ]; then
-		want custom
-	else
-		# First custom settings: start from the profile in use.
-		load_profile
-		want "$P"
-	fi
+	load_profile
+	want "$P"
 	bad=
 	for a in "$@"; do
 		k=${a%%=*}
@@ -324,17 +320,15 @@ cpu4-cpu7 all offline: keep at least one big core online"
 knobs() {
 	load_profile
 	tables
-	saved=0
-	[ -f "$CUSTOM" ] && saved=1 && want custom
+	want "$P"
 	echo "profile=$P"
-	echo "saved=$saved"
 	for k in $KEYS; do
 		live "$k"
 		stock "$k"
 		echo "$k=$L"
 		echo "$k.options=$O"
 		echo "$k.stock=$S"
-		[ $saved = 1 ] && eval "echo \"$k.saved=\$v_$k\""
+		eval "echo \"$k.want=\$v_$k\""
 	done
 }
 

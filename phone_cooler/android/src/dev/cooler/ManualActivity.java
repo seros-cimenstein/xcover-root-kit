@@ -21,8 +21,9 @@ import java.util.regex.Pattern;
 
 /**
  * Manual controls for the custom profile: every knob {@code cool.sh knobs} offers, with its real
- * allowed values. Nothing changes until Apply, which runs {@code cool.sh apply key=value ...};
- * cool.sh validates again and its errors are shown. The live readout refreshes every 2 s.
+ * allowed values, starting from the values of the profile in use (a preset's, or the saved custom
+ * ones). Nothing changes until Apply, which runs {@code cool.sh apply key=value ...}; cool.sh
+ * validates again and its errors are shown. The live readout refreshes every 2 s.
  */
 public class ManualActivity extends Activity {
     private static final long REFRESH_MS = 2000;
@@ -198,7 +199,7 @@ public class ManualActivity extends Activity {
     // ---- building the controls from `cool.sh knobs` ----
 
     private void build(String knobs) {
-        Map<String, String> live = new HashMap<>(), saved = new HashMap<>();
+        Map<String, String> live = new HashMap<>(), want = new HashMap<>();
         for (String line : knobs.split("\n")) {
             int eq = line.indexOf('=');
             if (eq <= 0) continue;
@@ -212,14 +213,13 @@ public class ManualActivity extends Activity {
             switch (k.substring(dot + 1)) {
                 case "options": options.put(key, v.split(" +")); break;
                 case "stock": stock.put(key, v); break;
-                case "saved": saved.put(key, v); break;
+                case "want": want.put(key, v); break;
                 default: break;
             }
         }
-        boolean hasSaved = "1".equals(live.get("saved"));
-        profileLine.setText("Profile now: " + Cool.label(live.getOrDefault("profile", "?")));
-        say(hasSaved ? "Showing your saved custom settings. Changes take effect on Apply."
-                : "Showing the current settings. Changes take effect on Apply.", Ui.MUTED);
+        String profile = Cool.label(live.getOrDefault("profile", "?"));
+        profileLine.setText("Profile now: " + profile);
+        say("Starting from " + profile + ". Changes take effect on Apply.", Ui.MUTED);
 
         cluster("LITTLE CORES (0-3)", "little", 0, 3);
         cluster("BIG CORES (4-7)", "big", 4, 7);
@@ -235,7 +235,7 @@ public class ManualActivity extends Activity {
         dims.put("gpu_governor", list(hs, hl));
 
         for (Control c : controls.values()) {
-            String v = hasSaved ? saved.get(c.key) : null;
+            String v = want.get(c.key);
             if (v == null || indexOf(c.opts, v) < 0) v = live.get(c.key);
             if (v == null || indexOf(c.opts, v) < 0) v = stock.get(c.key);
             if (v != null) c.set(v);
