@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds battery-optimiser.apk without Gradle: aapt2 compile/link -> javac -> d8 -> zipalign -> apksigner.
 # Needs a JDK and, from the Android SDK, build-tools plus a platform android.jar (API 30). By
-# default it reuses LanPad's ../../phone_synaptic_trackpad/.sdk; if that is missing they are
-# downloaded there (~150 MB) unless SDK / ANDROID_BUILD_TOOLS / ANDROID_JAR are set.
+# default it uses .sdk/ at the repository root (shared with phone_cooler); if that is missing
+# they are downloaded there (~150 MB) unless SDK / ANDROID_BUILD_TOOLS / ANDROID_JAR are set.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd .. && pwd)
-SDK=${SDK:-$(cd "$ROOT/.." && pwd)/phone_synaptic_trackpad/.sdk}
+SDK=${SDK:-$(cd "$ROOT/.." && pwd)/.sdk}
 BT=${ANDROID_BUILD_TOOLS:-$SDK/android-37.0}
 JAR=${ANDROID_JAR:-$SDK/android-11/android.jar}
 

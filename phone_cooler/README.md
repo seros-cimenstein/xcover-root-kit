@@ -105,9 +105,10 @@ Custom the saved custom values, on a preset that preset's). Custom settings live
 ./install.sh uninstall    # stock clocks back, daemon stopped, files removed
 ```
 
-It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (`../remote_control`),
-else the only adb device. Needs root for adb's shell (Magisk: Shell allowed) and a JDK; the
-Android build tools come from `../phone_synaptic_trackpad/.sdk` (see `android/build.sh`).
+It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (part of a separate
+remote-control setup, not in this repo), else the only adb device. Needs root for adb's shell
+(Magisk: Shell allowed) and a JDK; the Android build tools come from `.sdk/` at the repository
+root, downloaded on first build (see `android/build.sh`).
 
 The app is only copied to `/data/local/tmp/cooler.apk`. Install it with the phone unlocked (Play
 Protect asks to confirm):

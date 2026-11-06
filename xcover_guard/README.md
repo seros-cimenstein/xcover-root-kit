@@ -32,9 +32,9 @@ Safety nets:
 ./install.sh uninstall  # guard off, listener stopped, files removed
 ```
 
-It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (`../remote_control`),
-else the only adb device. Needs root for adb's shell (Magisk: Shell allowed) and `zig` on the
-laptop to cross-compile the helper.
+It uses `$ANDROID_SERIAL`, else the Tailscale address saved by `phone-adb` (part of a separate
+remote-control setup, not in this repo), else the only adb device. Needs root for adb's shell
+(Magisk: Shell allowed) and `zig` on the laptop to cross-compile the helper.
 
 On the phone, agents can also run `su -c /data/adb/xcover-guard/guard.sh on|off|status`
 (`stop` stops the listener).
